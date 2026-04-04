@@ -2,13 +2,14 @@ package com.conekt.suite.feature.library
 
 import android.app.Application
 import android.net.Uri
-import android.os.Build
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.conekt.suite.data.model.LocalTrack
 import com.conekt.suite.data.model.MusicStats
 import com.conekt.suite.data.model.MusicTrackRecord
 import com.conekt.suite.data.repository.MusicRepository
+import com.conekt.suite.data.repository.MusicSettingsRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,13 +19,15 @@ import kotlinx.coroutines.launch
 
 class MusicViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val repo = MusicRepository()
+    private val repo         = MusicRepository()
+    private val settingsRepo = MusicSettingsRepository(app)
 
     private val _uiState = MutableStateFlow(MusicUiState())
     val uiState: StateFlow<MusicUiState> = _uiState.asStateFlow()
 
     private var progressJob: Job? = null
     private var playStartMs: Long = 0L
+    private var livePresenceJob: Job? = null
 
     init {
         ConektPlayer.init(app)
@@ -32,6 +35,22 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         loadStats()
         scanLocalTracks()
         observePlayerState()
+        loadSettings()
+        startLiveListenersPoll()
+    }
+
+    // ── Settings ──────────────────────────────────────────────────────────────
+
+    private fun loadSettings() {
+        viewModelScope.launch {
+            val s = settingsRepo.load()
+            update { copy(settings = s) }
+        }
+    }
+
+    fun onSettingsChange(settings: MusicSettings) {
+        update { copy(settings = settings) }
+        viewModelScope.launch { settingsRepo.save(settings) }
     }
 
     // ── Init / load ───────────────────────────────────────────────────────────
@@ -39,7 +58,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     private fun loadOnlineTracks() {
         viewModelScope.launch {
             update { copy(isLoadingOnline = true) }
-            val tracks = safeList { repo.fetchPublicTracks() }
+            val tracks  = safeList { repo.fetchPublicTracks() }
             val uploads = safeList { repo.fetchMyUploads() }
             update { copy(isLoadingOnline = false, onlineTracks = tracks, myUploads = uploads) }
         }
@@ -74,23 +93,40 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ── Live listeners poll ───────────────────────────────────────────────────
+
+    private fun startLiveListenersPoll() {
+        livePresenceJob?.cancel()
+        livePresenceJob = viewModelScope.launch {
+            while (true) {
+                val listeners = safeList { repo.fetchLiveListeners() }
+                update { copy(liveListeners = listeners) }
+                delay(15_000)
+            }
+        }
+    }
+
     // ── Playback ──────────────────────────────────────────────────────────────
 
     fun playLocal(track: LocalTrack) {
         val active = ActiveTrack(
-            id          = null,
-            title       = track.title,
-            artist      = track.artist,
-            album       = track.album,
-            uri         = track.uri,
-            coverUri    = track.albumArtUri,
-            durationMs  = track.duration,
-            source      = MusicSource.LOCAL
+            id         = null,
+            title      = track.title,
+            artist     = track.artist,
+            album      = track.album,
+            uri        = track.uri,
+            coverUri   = track.albumArtUri,
+            durationMs = track.duration,
+            source     = MusicSource.LOCAL
         )
         ConektPlayer.play(track.uri, track.title, track.artist)
         update { copy(activeTrack = active, isPlaying = true, progressFraction = 0f) }
         startProgressTracking()
         playStartMs = System.currentTimeMillis()
+        val settings = _uiState.value.settings
+        if (settings.shareLocalActivity) {
+            viewModelScope.launch { safeGet { repo.broadcastLocalPlay(track.title, track.artist) } }
+        }
     }
 
     fun playOnline(track: MusicTrackRecord) {
@@ -108,13 +144,12 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         update { copy(activeTrack = active, isPlaying = true, progressFraction = 0f) }
         startProgressTracking()
         playStartMs = System.currentTimeMillis()
-        // Join listener presence
         viewModelScope.launch { repo.joinListener(track.id) }
     }
 
     fun togglePlayPause() {
         ConektPlayer.togglePlayPause()
-        val nowPlaying = !_uiState.value.isPlaying
+        val nowPlaying = ConektPlayer.isActuallyPlaying
         update { copy(isPlaying = nowPlaying) }
         if (!nowPlaying) recordCurrentPlay(completed = false)
     }
@@ -132,9 +167,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
             if (next.source == MusicSource.LOCAL) {
                 playLocal(LocalTrack(0, next.title, next.artist, next.album, next.durationMs, next.uri, next.coverUri))
             } else {
-                // rebuild MusicTrackRecord from ActiveTrack — find in state
-                _uiState.value.onlineTracks.find { it.id == next.id }
-                    ?.let { playOnline(it) }
+                _uiState.value.onlineTracks.find { it.id == next.id }?.let { playOnline(it) }
             }
         }
     }
@@ -147,10 +180,19 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
             if (prev.source == MusicSource.LOCAL) {
                 playLocal(LocalTrack(0, prev.title, prev.artist, prev.album, prev.durationMs, prev.uri, prev.coverUri))
             } else {
-                _uiState.value.onlineTracks.find { it.id == prev.id }
-                    ?.let { playOnline(it) }
+                _uiState.value.onlineTracks.find { it.id == prev.id }?.let { playOnline(it) }
             }
         }
+    }
+
+    fun buildQueue(): List<ActiveTrack> {
+        val online = _uiState.value.onlineTracks.map { t ->
+            ActiveTrack(t.id, t.title, t.artist, t.album ?: "", t.fileUrl, t.coverUrl, t.durationMs.toLong(), MusicSource.ONLINE)
+        }
+        val local = _uiState.value.localTracks.map { t ->
+            ActiveTrack(null, t.title, t.artist, t.album, t.uri, t.albumArtUri, t.duration, MusicSource.LOCAL)
+        }
+        return online + local
     }
 
     private fun startProgressTracking() {
@@ -169,10 +211,28 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         val track = _uiState.value.activeTrack ?: return
         if (track.id == null || track.source != MusicSource.ONLINE) return
         val durationS = ((System.currentTimeMillis() - playStartMs) / 1000).toInt()
+        viewModelScope.launch { repo.recordPlay(track.id, durationS, completed, "stream") }
+    }
+
+    // ── Download ──────────────────────────────────────────────────────────────
+
+    fun downloadTrack(liveEntry: LiveListenerEntry) {
         viewModelScope.launch {
-            repo.recordPlay(track.id, durationS, completed, "stream")
+            update { copy(downloadingTrackId = liveEntry.trackId) }
+            val result = safeGet {
+                repo.downloadTrackToLocal(
+                    context  = getApplication(),
+                    trackId  = liveEntry.trackId,
+                    fileUrl  = liveEntry.trackFileUrl,
+                    title    = liveEntry.trackTitle,
+                    artist   = liveEntry.artistName
+                )
+            }
+            update { copy(downloadingTrackId = null, downloadToastMessage = if (result == true) "Downloaded to your library!" else "Download failed") }
         }
     }
+
+    fun clearDownloadToast() = update { copy(downloadToastMessage = null) }
 
     // ── Search ────────────────────────────────────────────────────────────────
 
@@ -188,20 +248,10 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     // ── Share sheet ───────────────────────────────────────────────────────────
 
     fun openShareSheet(localTrack: LocalTrack) {
-        update {
-            copy(
-                shareSheet = ShareMusicState(
-                    visible     = true,
-                    localTrack  = localTrack,
-                    title       = localTrack.title,
-                    artist      = localTrack.artist
-                )
-            )
-        }
+        update { copy(shareSheet = ShareMusicState(visible = true, localTrack = localTrack, title = localTrack.title, artist = localTrack.artist)) }
     }
 
-    fun closeShareSheet() = update { copy(shareSheet = ShareMusicState()) }
-
+    fun closeShareSheet()              = update { copy(shareSheet = ShareMusicState()) }
     fun onShareTitleChange(v: String)  = updateShare { copy(title = v) }
     fun onShareArtistChange(v: String) = updateShare { copy(artist = v) }
     fun onShareGenreChange(v: String)  = updateShare { copy(genre = v) }
@@ -209,12 +259,10 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     fun onSharePublicToggle()          = updateShare { copy(isPublic = !isPublic) }
 
     fun submitShare() {
-        val sheet     = _uiState.value.shareSheet
-        val local     = sheet.localTrack ?: return
+        val sheet = _uiState.value.shareSheet
+        val local = sheet.localTrack ?: return
         if (sheet.title.isBlank()) { updateShare { copy(errorMessage = "Title is required.") }; return }
-
         updateShare { copy(isUploading = true, errorMessage = null) }
-
         viewModelScope.launch {
             runCatching {
                 repo.uploadTrack(
@@ -228,12 +276,8 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
                     durationMs = local.duration.toInt(),
                     isPublic   = sheet.isPublic
                 )
-            }.onSuccess { track ->
-                loadOnlineTracks()
-                updateShare { copy(isUploading = false, isSuccess = true) }
-            }.onFailure { e ->
-                updateShare { copy(isUploading = false, errorMessage = e.message ?: "Upload failed.") }
-            }
+            }.onSuccess { loadOnlineTracks(); updateShare { copy(isUploading = false, isSuccess = true) } }
+                .onFailure { e -> updateShare { copy(isUploading = false, errorMessage = e.message ?: "Upload failed.") } }
         }
     }
 
@@ -258,7 +302,6 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         val trackId = sheet.trackId ?: return
         val text    = sheet.draftText.trim()
         if (text.isBlank()) return
-
         update { copy(commentsSheet = sheet.copy(isPosting = true)) }
         viewModelScope.launch {
             runCatching { repo.postComment(trackId, text) }
@@ -266,9 +309,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
                     val updated = safeList { repo.fetchComments(trackId) }
                     update { copy(commentsSheet = _uiState.value.commentsSheet.copy(isPosting = false, draftText = "", comments = updated)) }
                 }
-                .onFailure {
-                    update { copy(commentsSheet = _uiState.value.commentsSheet.copy(isPosting = false)) }
-                }
+                .onFailure { update { copy(commentsSheet = _uiState.value.commentsSheet.copy(isPosting = false)) } }
         }
     }
 
@@ -276,6 +317,19 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onPermissionGranted() {
         update { copy(needsStoragePermission = false) }
+        scanLocalTracks()
+    }
+
+    // ── Settings ──────────────────────────────────────────────────────────────
+
+    fun openSettings()  = update { copy(showSettings = true) }
+    fun closeSettings() = update { copy(showSettings = false) }
+
+    // ── Refresh ───────────────────────────────────────────────────────────────
+
+    fun refresh() {
+        loadOnlineTracks()
+        loadStats()
         scanLocalTracks()
     }
 
@@ -289,15 +343,21 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         _uiState.value = _uiState.value.copy(shareSheet = _uiState.value.shareSheet.block())
     }
 
-    private suspend fun <T> safeGet(block: suspend () -> T): T? = try { block() } catch (e: Exception) { null }
-    private suspend fun <T> safeList(block: suspend () -> List<T>): List<T> = try { block() } catch (e: Exception) { emptyList() }
+    private suspend fun <T> safeGet(block: suspend () -> T): T? = try { block() } catch (_: Exception) { null }
+    private suspend fun <T> safeList(block: suspend () -> List<T>): List<T> = try { block() } catch (_: Exception) { emptyList() }
 
     override fun onCleared() {
         super.onCleared()
         progressJob?.cancel()
+        livePresenceJob?.cancel()
         val track = _uiState.value.activeTrack
         if (track?.id != null && track.source == MusicSource.ONLINE) {
             viewModelScope.launch { repo.leaveListener(track.id) }
         }
+    }
+
+    // ── Factory — required for AndroidViewModel with by viewModels() ──────────
+    companion object {
+        val Factory: ViewModelProvider.Factory = ViewModelProvider.AndroidViewModelFactory()
     }
 }

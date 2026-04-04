@@ -1,9 +1,13 @@
 package com.conekt.suite.data.repository
 
+import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import com.conekt.suite.core.supabase.SupabaseProvider
 import com.conekt.suite.data.model.MusicCommentRecord
 import com.conekt.suite.data.model.MusicCommentWithAuthor
@@ -11,18 +15,27 @@ import com.conekt.suite.data.model.MusicListenerInsert
 import com.conekt.suite.data.model.MusicPlayInsert
 import com.conekt.suite.data.model.MusicStats
 import com.conekt.suite.data.model.MusicTrackRecord
-import com.conekt.suite.data.model.MusicTrackWithUploader
 import com.conekt.suite.feature.library.LocalMusicScanner
 import com.conekt.suite.data.model.LocalTrack
+import com.conekt.suite.feature.library.LiveListenerEntry
 import io.github.jan.supabase.postgrest.from
 import io.github.jan.supabase.postgrest.postgrest
 import io.github.jan.supabase.postgrest.query.Columns
 import io.github.jan.supabase.postgrest.query.Order
 import io.github.jan.supabase.postgrest.rpc
 import io.github.jan.supabase.storage.storage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.io.ByteArrayOutputStream
+import java.net.URL
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALL @Serializable DTOs must be at file (top) level.
+// The Kotlin serialization compiler plugin cannot generate serializers for
+// classes declared inside function bodies or companion objects.
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Serializable
 private data class TrackInsert(
@@ -45,6 +58,36 @@ private data class CommentInsert(
     val body: String
 )
 
+// ── Live-listener join DTOs ───────────────────────────────────────────────────
+
+@Serializable
+private data class ListenerProfile(
+    val id: String,
+    val username: String,
+    @SerialName("display_name") val displayName: String? = null,
+    @SerialName("avatar_url")   val avatarUrl: String?   = null
+)
+
+@Serializable
+private data class ListenerTrack(
+    val id: String,
+    val title: String,
+    val artist: String,
+    @SerialName("cover_url") val coverUrl: String? = null,
+    @SerialName("file_url")  val fileUrl: String,
+    @SerialName("is_public") val isPublic: Boolean = true
+)
+
+@Serializable
+private data class ListenerRow(
+    @SerialName("track_id")   val trackId: String,
+    @SerialName("started_at") val startedAt: String,
+    val listener: ListenerProfile,
+    val track: ListenerTrack
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 class MusicRepository(
     private val authRepository: AuthRepository = AuthRepository()
 ) {
@@ -59,7 +102,7 @@ class MusicRepository(
 
     // ── Online tracks ─────────────────────────────────────────────────────────
 
-    suspend fun fetchPublicTracks(limit: Int = 20): List<MusicTrackRecord> =
+    suspend fun fetchPublicTracks(limit: Int = 30): List<MusicTrackRecord> =
         supabase.from("music_tracks")
             .select {
                 filter { eq("is_public", true) }
@@ -82,42 +125,87 @@ class MusicRepository(
                 filter {
                     eq("is_public", true)
                     or {
-                        ilike("title", "%$query%")
+                        ilike("title",  "%$query%")
                         ilike("artist", "%$query%")
-                        ilike("album", "%$query%")
+                        ilike("album",  "%$query%")
+                        ilike("genre",  "%$query%")
                     }
                 }
-                limit(30)
+                limit(40)
             }
             .decodeList<MusicTrackRecord>()
+
+    // ── Live listeners ────────────────────────────────────────────────────────
+
+    /**
+     * Returns who is currently streaming, by joining music_listeners with
+     * profiles and music_tracks. Only public tracks are included.
+     */
+    suspend fun fetchLiveListeners(): List<LiveListenerEntry> {
+        val columns = Columns.raw(
+            """
+            track_id,
+            started_at,
+            listener:profiles!music_listeners_listener_id_fkey (
+                id, username, display_name, avatar_url
+            ),
+            track:music_tracks!music_listeners_track_id_fkey (
+                id, title, artist, cover_url, file_url, is_public
+            )
+            """.trimIndent()
+        )
+        return try {
+            supabase.from("music_listeners")
+                .select(columns = columns) {}
+                .decodeList<ListenerRow>()           // ListenerRow is file-level → OK
+                .filter { it.track.isPublic }
+                .map { row ->
+                    LiveListenerEntry(
+                        userId        = row.listener.id,
+                        username      = row.listener.username,
+                        displayName   = row.listener.displayName,
+                        avatarUrl     = row.listener.avatarUrl,
+                        trackId       = row.track.id,
+                        trackTitle    = row.track.title,
+                        artistName    = row.track.artist,
+                        trackCoverUrl = row.track.coverUrl,
+                        trackFileUrl  = row.track.fileUrl,
+                        isLocal       = false
+                    )
+                }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    /** Best-effort: mark user as playing a local track for friends to see. */
+    suspend fun broadcastLocalPlay(title: String, artist: String) {
+        // Wire up once music_local_broadcasts table is confirmed in Supabase.
+    }
 
     // ── Upload music ──────────────────────────────────────────────────────────
 
     suspend fun uploadTrack(
-        context: Context,
-        audioUri: Uri,
-        coverUri: Uri?,
-        title: String,
-        artist: String,
-        album: String?,
-        genre: String?,
+        context:    Context,
+        audioUri:   Uri,
+        coverUri:   Uri?,
+        title:      String,
+        artist:     String,
+        album:      String?,
+        genre:      String?,
         durationMs: Int,
-        isPublic: Boolean
+        isPublic:   Boolean
     ): MusicTrackRecord {
-        val myUid    = uid()
-        val ts       = System.currentTimeMillis()
+        val myUid     = uid()
+        val ts        = System.currentTimeMillis()
         val audioPath = "$myUid/$ts.mp3"
 
-        // Read audio bytes
         val audioBytes = context.contentResolver.openInputStream(audioUri)
-            ?.readBytes()
-            ?: error("Cannot read audio file")
+            ?.readBytes() ?: error("Cannot read audio file")
 
-        // Upload audio
         supabase.storage.from("conekt-music").upload(audioPath, audioBytes) { upsert = true }
         val audioUrl = supabase.storage.from("conekt-music").publicUrl(audioPath)
 
-        // Upload cover if provided
         val coverUrl = coverUri?.let {
             val coverPath = "$myUid/covers/$ts.jpg"
             val stream    = context.contentResolver.openInputStream(it)
@@ -133,7 +221,6 @@ class MusicRepository(
             supabase.storage.from("conekt-music").publicUrl(coverPath)
         }
 
-        // Insert record
         return supabase.from("music_tracks")
             .insert(
                 TrackInsert(
@@ -152,9 +239,54 @@ class MusicRepository(
             .decodeSingle<MusicTrackRecord>()
     }
 
+    // ── Download track to device ──────────────────────────────────────────────
+
+    suspend fun downloadTrackToLocal(
+        context:  Context,
+        trackId:  String,
+        fileUrl:  String,
+        title:    String,
+        artist:   String
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val bytes = URL(fileUrl).readBytes()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Audio.Media.DISPLAY_NAME, "$title - $artist.mp3")
+                    put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
+                    put(MediaStore.Audio.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/Conekt")
+                    put(MediaStore.Audio.Media.IS_PENDING, 1)
+                }
+                val uri = context.contentResolver
+                    .insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: return@withContext false
+                context.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                values.clear()
+                values.put(MediaStore.Audio.Media.IS_PENDING, 0)
+                context.contentResolver.update(uri, values, null, null)
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = java.io.File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
+                    "Conekt"
+                )
+                dir.mkdirs()
+                java.io.File(dir, "$title - $artist.mp3").writeBytes(bytes)
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     // ── Play tracking ─────────────────────────────────────────────────────────
 
-    suspend fun recordPlay(trackId: String, durationS: Int, completed: Boolean, source: String = "stream") {
+    suspend fun recordPlay(
+        trackId:   String,
+        durationS: Int,
+        completed: Boolean,
+        source:    String = "stream"
+    ) {
         runCatching {
             supabase.from("music_plays").insert(
                 MusicPlayInsert(
@@ -165,11 +297,7 @@ class MusicRepository(
                     source     = source
                 )
             )
-            // Increment play_count via DB function
-            supabase.postgrest.rpc(
-                "increment_play_count",
-                mapOf("track_id" to trackId)
-            )
+            supabase.postgrest.rpc("increment_play_count", mapOf("track_id" to trackId))
         }
     }
 
@@ -184,18 +312,11 @@ class MusicRepository(
     suspend fun leaveListener(trackId: String) = runCatching {
         supabase.from("music_listeners").delete {
             filter {
-                eq("track_id", trackId)
+                eq("track_id",    trackId)
                 eq("listener_id", uid())
             }
         }
     }
-
-    suspend fun getActiveListenerCount(trackId: String): Int = runCatching {
-        supabase.from("music_listeners")
-            .select { filter { eq("track_id", trackId) } }
-            .decodeList<MusicListenerInsert>()
-            .size
-    }.getOrDefault(0)
 
     // ── Comments ──────────────────────────────────────────────────────────────
 
@@ -218,24 +339,23 @@ class MusicRepository(
 
     suspend fun postComment(trackId: String, body: String): MusicCommentRecord {
         val record = supabase.from("music_comments")
-            .insert(CommentInsert(trackId = trackId, authorId = uid(), body = body.trim())) {
-                select()
-            }
+            .insert(
+                CommentInsert(trackId = trackId, authorId = uid(), body = body.trim())
+            ) { select() }
             .decodeSingle<MusicCommentRecord>()
-        runCatching { supabase.postgrest.rpc("increment_comment_count", mapOf("track_id" to trackId)) }
+        runCatching {
+            supabase.postgrest.rpc("increment_comment_count", mapOf("track_id" to trackId))
+        }
         return record
-    }
-
-    suspend fun deleteComment(commentId: String) {
-        supabase.from("music_comments").delete { filter { eq("id", commentId) } }
     }
 
     // ── Stats ─────────────────────────────────────────────────────────────────
 
     suspend fun getMyStats(): MusicStats {
-        val myUid = uid()
-        // Count today's plays
-        val today = java.time.LocalDate.now().toString()
+        val myUid      = uid()
+        val today      = java.time.LocalDate.now().toString()
+        val monthStart = java.time.LocalDate.now().withDayOfMonth(1).toString()
+
         val todayPlays = runCatching {
             supabase.from("music_plays")
                 .select {
@@ -244,12 +364,9 @@ class MusicRepository(
                         gte("played_at", "${today}T00:00:00Z")
                     }
                 }
-                .decodeList<MusicPlayInsert>()
-                .size
+                .decodeList<MusicPlayInsert>().size
         }.getOrDefault(0)
 
-        // Count this month
-        val monthStart = java.time.LocalDate.now().withDayOfMonth(1).toString()
         val monthlyPlays = runCatching {
             supabase.from("music_plays")
                 .select {
@@ -258,11 +375,9 @@ class MusicRepository(
                         gte("played_at", "${monthStart}T00:00:00Z")
                     }
                 }
-                .decodeList<MusicPlayInsert>()
-                .size
+                .decodeList<MusicPlayInsert>().size
         }.getOrDefault(0)
 
-        // My most played upload
         val topTrack = runCatching {
             supabase.from("music_tracks")
                 .select {
@@ -277,7 +392,7 @@ class MusicRepository(
         return MusicStats(
             todayPlays   = todayPlays,
             monthlyPlays = monthlyPlays,
-            totalPlays   = monthlyPlays, // simplified
+            totalPlays   = monthlyPlays,
             topTrack     = topTrack
         )
     }
