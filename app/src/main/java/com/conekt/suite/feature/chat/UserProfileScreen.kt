@@ -18,46 +18,57 @@ import androidx.compose.ui.unit.*
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
 import com.conekt.suite.ui.theme.*
+import kotlinx.coroutines.launch
 
 @Composable
 fun UserProfileScreen(
-    userId:         String,
-    onBack:         () -> Unit,
-    onStartChat:    (convId: String, otherId: String, name: String, avatar: String?) -> Unit,
+    userId:      String,
+    onBack:      () -> Unit,
+    onStartChat: (convId: String, otherId: String, name: String, avatar: String?) -> Unit,
     vm: UserProfileViewModel = viewModel()
 ) {
     val state by vm.state.collectAsState()
-    val threadVm: ChatThreadViewModel = viewModel()
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(userId) { vm.load(userId) }
 
-    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0A0A0E))) {
+    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF08090D))) {
         when {
             state.isLoading -> {
                 CircularProgressIndicator(Modifier.align(Alignment.Center), color = BrandEnd, strokeWidth = 2.dp)
             }
+
             state.profile == null -> {
                 Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Rounded.PersonOff, null, tint = Color.White.copy(alpha = 0.30f), modifier = Modifier.size(48.dp))
-                    Text("Profile not found", color = Color.White.copy(alpha = 0.50f), modifier = Modifier.padding(top = 12.dp))
+                    Icon(Icons.Rounded.PersonOff, null, tint = Color.White.copy(alpha = 0.25f), modifier = Modifier.size(48.dp))
+                    Text("Profile not found", color = Color.White.copy(alpha = 0.45f), modifier = Modifier.padding(top = 12.dp))
+                }
+                Box(Modifier.align(Alignment.TopStart).padding(top = 56.dp, start = 16.dp).size(38.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.08f)).clickable { onBack() }, contentAlignment = Alignment.Center) {
+                    Icon(Icons.Rounded.ArrowBack, null, tint = Color.White, modifier = Modifier.size(20.dp))
                 }
             }
+
             else -> {
                 val profile = state.profile!!
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    // Banner
-                    item {
-                        Box(modifier = Modifier.fillMaxWidth().height(200.dp)) {
-                            // Banner bg
-                            Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(BrandStart.copy(alpha = 0.30f), BrandEnd.copy(alpha = 0.20f), Color(0xFF0A0A0E)))))
-                            profile.bannerUrl?.ifBlank { null }?.let {
-                                AsyncImage(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.30f)))
+                val name    = profile.displayName ?: profile.username
+
+                LazyColumn(Modifier.fillMaxSize()) {
+
+                    // ── Banner ────────────────────────────────────────────────
+                    item(key = "banner") {
+                        Box(Modifier.fillMaxWidth().height(220.dp)) {
+                            // Background
+                            Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(BrandStart.copy(alpha = 0.28f), BrandEnd.copy(alpha = 0.18f), Color(0xFF08090D)))))
+                            profile.bannerUrl?.ifBlank { null }?.let { url ->
+                                AsyncImage(url, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.28f)))
                             }
-                            // Back button
+                            // Back btn
                             Box(
-                                Modifier.padding(top = 56.dp, start = 16.dp).size(38.dp).clip(CircleShape)
-                                    .background(Color.Black.copy(alpha = 0.40f)).clickable { onBack() },
+                                Modifier.statusBarsPadding().padding(start = 16.dp, top = 10.dp)
+                                    .size(38.dp).clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.38f))
+                                    .clickable { onBack() },
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(Icons.Rounded.ArrowBack, null, tint = Color.White, modifier = Modifier.size(20.dp))
@@ -65,32 +76,27 @@ fun UserProfileScreen(
                         }
                     }
 
-                    // Avatar + name row
-                    item {
-                        Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
+                    // ── Avatar + actions ──────────────────────────────────────
+                    item(key = "avatar_actions") {
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp).offset(y = (-44).dp), verticalAlignment = Alignment.Bottom) {
                             // Avatar
                             Box(
-                                modifier = Modifier.offset(y = (-38).dp)
-                                    .size(80.dp).clip(CircleShape)
-                                    .border(3.dp, Color(0xFF0A0A0E), CircleShape)
+                                Modifier.size(88.dp).clip(CircleShape)
+                                    .border(3.dp, Color(0xFF08090D), CircleShape)
                                     .background(BrandEnd.copy(alpha = 0.20f))
                             ) {
                                 profile.avatarUrl?.ifBlank { null }?.let {
                                     AsyncImage(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                                 } ?: Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        (profile.displayName ?: profile.username).first().uppercaseChar().toString(),
-                                        style = MaterialTheme.typography.headlineSmall, color = BrandEnd, fontWeight = FontWeight.Bold
-                                    )
+                                    Text(name.first().uppercaseChar().toString(), style = MaterialTheme.typography.headlineSmall, color = BrandEnd, fontWeight = FontWeight.Bold)
                                 }
                             }
 
+                            Spacer(Modifier.weight(1f))
+
                             // Action buttons
-                            Row(
-                                Modifier.align(Alignment.TopEnd).padding(top = 8.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                // Message button
+                            Row(Modifier.padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                // Message
                                 Surface(
                                     shape  = RoundedCornerShape(14.dp),
                                     color  = Color.White.copy(alpha = 0.08f),
@@ -98,31 +104,34 @@ fun UserProfileScreen(
                                 ) {
                                     Box(
                                         Modifier.clickable {
-                                            // start or open a DM
-                                        }.padding(horizontal = 14.dp, vertical = 9.dp)
+                                            scope.launch {
+                                                val convId = vm.getOrCreateDm(userId)
+                                                if (convId.isNotBlank()) {
+                                                    onStartChat(convId, userId, name, profile.avatarUrl)
+                                                }
+                                            }
+                                        }.padding(horizontal = 16.dp, vertical = 9.dp)
                                     ) {
                                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            Icon(Icons.Rounded.ChatBubble, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                            Icon(Icons.Rounded.ChatBubble, null, tint = Color.White, modifier = Modifier.size(15.dp))
                                             Text("Message", style = MaterialTheme.typography.labelMedium, color = Color.White, fontWeight = FontWeight.SemiBold)
                                         }
                                     }
                                 }
 
-                                // Follow button
+                                // Follow / Unfollow
                                 val following = state.isFollowing
                                 Surface(
-                                    shape    = RoundedCornerShape(14.dp),
-                                    color    = if (following) Color.Transparent else BrandEnd,
-                                    border   = if (following) BorderStroke(1.dp, Color.White.copy(alpha = 0.20f)) else null
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = if (following) Color.Transparent else BrandEnd,
+                                    border = if (following) BorderStroke(1.dp, Color.White.copy(alpha = 0.18f)) else null
                                 ) {
-                                    Box(
-                                        Modifier.clickable { vm.toggleFollow(userId) }.padding(horizontal = 18.dp, vertical = 9.dp)
-                                    ) {
+                                    Box(Modifier.clickable { vm.toggleFollow(userId) }.padding(horizontal = 20.dp, vertical = 9.dp)) {
                                         Text(
                                             if (following) "Following" else "Follow",
                                             style      = MaterialTheme.typography.labelMedium,
-                                            color      = if (following) Color.White.copy(alpha = 0.70f) else Color.White,
-                                            fontWeight = FontWeight.Bold
+                                            fontWeight = FontWeight.Bold,
+                                            color      = if (following) Color.White.copy(alpha = 0.65f) else Color.White
                                         )
                                     }
                                 }
@@ -130,37 +139,46 @@ fun UserProfileScreen(
                         }
                     }
 
-                    // Name + bio
-                    item {
-                        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).offset(y = (-28).dp)) {
+                    // ── Bio ───────────────────────────────────────────────────
+                    item(key = "bio") {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).offset(y = (-32).dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text(profile.displayName ?: profile.username, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
-                                if (profile.isVerified) Icon(Icons.Rounded.Verified, null, tint = BrandEnd, modifier = Modifier.size(18.dp))
+                                Text(name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
+                                if (profile.isVerified) {
+                                    Icon(Icons.Rounded.Verified, null, tint = BrandEnd, modifier = Modifier.size(18.dp))
+                                }
                             }
-                            Text("@${profile.username}", style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.45f), modifier = Modifier.padding(top = 2.dp))
+                            Text("@${profile.username}", style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.40f), modifier = Modifier.padding(top = 2.dp))
+
                             profile.bio?.ifBlank { null }?.let {
-                                Text(it, style = MaterialTheme.typography.bodyMedium, color = Color.White.copy(alpha = 0.80f), modifier = Modifier.padding(top = 10.dp))
+                                Text(it, style = MaterialTheme.typography.bodyMedium, color = Color.White.copy(alpha = 0.78f), modifier = Modifier.padding(top = 12.dp))
                             }
-                            // Stats row
-                            Row(Modifier.padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                                StatItem("${profile.followerCount}", "Followers")
-                                StatItem("${profile.followingCount}", "Following")
+
+                            // Stats
+                            Row(Modifier.padding(top = 18.dp), horizontalArrangement = Arrangement.spacedBy(28.dp)) {
+                                ProfileStat("${profile.followerCount}", "Followers")
+                                ProfileStat("${profile.followingCount}", "Following")
                             }
                         }
                     }
 
-                    // Posts placeholder (you'd pull from PulseRepository)
-                    item {
+                    // ── Divider ───────────────────────────────────────────────
+                    item(key = "div") {
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(horizontal = 20.dp).offset(y = (-16).dp))
+                    }
+
+                    // ── Posts grid placeholder ────────────────────────────────
+                    item(key = "posts_empty") {
                         Box(
-                            Modifier.fillMaxWidth().padding(20.dp).height(120.dp)
-                                .clip(RoundedCornerShape(20.dp))
-                                .background(Color.White.copy(alpha = 0.05f))
-                                .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(20.dp)),
+                            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 24.dp).height(140.dp)
+                                .clip(RoundedCornerShape(22.dp))
+                                .background(Color.White.copy(alpha = 0.04f))
+                                .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(22.dp)),
                             contentAlignment = Alignment.Center
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Icon(Icons.Rounded.GridView, null, tint = Color.White.copy(alpha = 0.25f), modifier = Modifier.size(32.dp))
-                                Text("No posts yet", color = Color.White.copy(alpha = 0.35f), style = MaterialTheme.typography.bodySmall)
+                                Icon(Icons.Rounded.GridView, null, tint = Color.White.copy(alpha = 0.20f), modifier = Modifier.size(34.dp))
+                                Text("No posts yet", color = Color.White.copy(alpha = 0.30f), style = MaterialTheme.typography.bodySmall)
                             }
                         }
                     }
@@ -171,9 +189,9 @@ fun UserProfileScreen(
 }
 
 @Composable
-private fun StatItem(value: String, label: String) {
+private fun ProfileStat(value: String, label: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
-        Text(label, style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.45f))
+        Text(label, style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.40f))
     }
 }

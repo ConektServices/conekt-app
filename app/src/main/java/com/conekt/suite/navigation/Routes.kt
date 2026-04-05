@@ -10,15 +10,16 @@ object Routes {
     const val EDIT_PROFILE = "edit_profile"
     const val CREATE_POST  = "create_post"
 
-    // ── Chat ──────────────────────────────────────────────────────────────────
-    const val CHAT         = "chat"                    // conversations list
-    const val CHAT_THREAD  = "chat_thread/{convId}/{otherId}/{name}"  // individual thread
-    const val USER_PROFILE = "user_profile/{userId}"   // another user's profile
+    // Chat
+    const val CHAT        = "chat"
+    const val CHAT_THREAD = "chat_thread/{convId}/{otherId}/{name}"
+    const val USER_PROFILE = "user_profile/{userId}"
 
-    fun chatThread(convId: String, otherId: String, name: String) =
-        "chat_thread/$convId/$otherId/${name.encodeForRoute()}"
+    fun chatThread(convId: String, otherId: String, name: String): String =
+        "chat_thread/${enc(convId)}/${enc(otherId)}/${enc(name)}"
 
-    fun userProfile(userId: String) = "user_profile/$userId"
+    fun userProfile(userId: String): String = "user_profile/${enc(userId)}"
 
-    private fun String.encodeForRoute() = java.net.URLEncoder.encode(this, "UTF-8")
+    private fun enc(s: String): String =
+        java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
 }

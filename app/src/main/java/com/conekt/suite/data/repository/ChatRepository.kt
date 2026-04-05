@@ -4,9 +4,10 @@ import android.content.Context
 import android.net.Uri
 import com.conekt.suite.core.supabase.SupabaseProvider
 import com.conekt.suite.feature.chat.ConversationItem
+import com.conekt.suite.feature.chat.FullUserProfile
 import com.conekt.suite.feature.chat.MessageItem
-import com.conekt.suite.feature.chat.StoryItem
-import com.conekt.suite.feature.chat.UserProfile
+import com.conekt.suite.feature.chat.StoryPreview
+import com.conekt.suite.feature.chat.UserSearchResult
 import io.github.jan.supabase.postgrest.from
 import io.github.jan.supabase.postgrest.query.Columns
 import io.github.jan.supabase.postgrest.query.Order
@@ -18,37 +19,49 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-// ── DTOs ─────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Row DTOs — must be file-level for serialization plugin
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Serializable
-private data class ConversationRow(
-    val id: String,
-    val type: String                                  = "direct",
-    val name: String?                                 = null,
-    @SerialName("avatar_url")     val avatarUrl: String? = null,
-    @SerialName("last_message")   val lastMessage: String? = null,
-    @SerialName("last_message_at") val lastMessageAt: String? = null,
-    @SerialName("created_at")    val createdAt: String   = ""
+private data class ConvRow(
+    val id: String                                        = "",
+    val type: String                                      = "direct",
+    val name: String?                                     = null,
+    @SerialName("avatar_url")      val avatarUrl: String? = null,
+    @SerialName("last_message")    val lastMessage: String? = null,
+    @SerialName("last_message_at") val lastMessageAt: String? = null
 )
 
 @Serializable
-private data class MessageRow(
-    val id: String                                     = "",
+private data class MemberConvRow(
+    @SerialName("conversation_id") val conversationId: String
+)
+
+@Serializable
+private data class MemberRow(
+    @SerialName("conversation_id") val conversationId: String,
+    @SerialName("user_id")         val userId: String
+)
+
+@Serializable
+private data class MsgRow(
+    val id: String                                       = "",
     @SerialName("conversation_id") val conversationId: String = "",
-    @SerialName("sender_id")       val senderId: String       = "",
-    val body: String?                                  = null,
-    @SerialName("message_type")    val messageType: String    = "text",
-    @SerialName("file_url")        val fileUrl: String?       = null,
-    @SerialName("file_name")       val fileName: String?      = null,
-    @SerialName("is_deleted")      val isDeleted: Boolean     = false,
-    @SerialName("created_at")      val createdAt: String      = ""
+    @SerialName("sender_id")       val senderId: String        = "",
+    val body: String?                                    = null,
+    @SerialName("message_type")    val messageType: String     = "text",
+    @SerialName("file_url")        val fileUrl: String?        = null,
+    @SerialName("file_name")       val fileName: String?       = null,
+    @SerialName("is_deleted")      val isDeleted: Boolean      = false,
+    @SerialName("created_at")      val createdAt: String       = ""
 )
 
 @Serializable
-private data class MessageInsert(
+private data class MsgInsert(
     @SerialName("conversation_id") val conversationId: String,
     @SerialName("sender_id")       val senderId: String,
-    val body: String?              = null,
+    val body: String?                                    = null,
     @SerialName("message_type")    val messageType: String = "text",
     @SerialName("file_url")        val fileUrl: String?   = null,
     @SerialName("file_name")       val fileName: String?  = null
@@ -58,30 +71,18 @@ private data class MessageInsert(
 private data class ProfileRow(
     val id: String,
     val username: String,
-    @SerialName("display_name")     val displayName: String?   = null,
-    @SerialName("avatar_url")       val avatarUrl: String?     = null,
-    @SerialName("banner_url")       val bannerUrl: String?     = null,
-    val bio: String?                                           = null,
-    @SerialName("is_verified")      val isVerified: Boolean    = false,
-    @SerialName("is_private")       val isPrivate: Boolean     = false,
-    @SerialName("follower_count")   val followerCount: Int     = 0,
-    @SerialName("following_count")  val followingCount: Int    = 0
+    @SerialName("display_name")     val displayName: String?  = null,
+    @SerialName("avatar_url")       val avatarUrl: String?    = null,
+    @SerialName("banner_url")       val bannerUrl: String?    = null,
+    val bio: String?                                          = null,
+    @SerialName("is_verified")      val isVerified: Boolean   = false,
+    @SerialName("is_private")       val isPrivate: Boolean    = false,
+    @SerialName("follower_count")   val followerCount: Int    = 0,
+    @SerialName("following_count")  val followingCount: Int   = 0
 )
 
 @Serializable
-private data class StoryRow(
-    val id: String,
-    @SerialName("author_id")  val authorId: String,
-    @SerialName("media_url")  val mediaUrl: String,
-    @SerialName("media_type") val mediaType: String,
-    val caption: String?                       = null,
-    @SerialName("expires_at") val expiresAt: String = "",
-    @SerialName("created_at") val createdAt: String = "",
-    val author: ProfileSnippetRow
-)
-
-@Serializable
-private data class ProfileSnippetRow(
+private data class StoryAuthorRow(
     val id: String,
     val username: String,
     @SerialName("display_name") val displayName: String? = null,
@@ -89,302 +90,310 @@ private data class ProfileSnippetRow(
 )
 
 @Serializable
-private data class FollowRow(
+private data class StoryRow(
+    val id: String,
+    @SerialName("author_id")  val authorId: String,
+    @SerialName("media_url")  val mediaUrl: String,
+    @SerialName("media_type") val mediaType: String = "image",
+    val caption: String?                              = null,
+    @SerialName("expires_at") val expiresAt: String   = "",
+    val author: StoryAuthorRow
+)
+
+@Serializable
+private data class FollowCheckRow(
     @SerialName("follower_id")  val followerId: String,
     @SerialName("following_id") val followingId: String
 )
 
-// ── Encryption helper ─────────────────────────────────────────────────────────
-// Messages are encrypted with AES-256-CBC using a key derived from the sorted
-// pair of user IDs (simple deterministic shared secret for demonstration).
-// In production you would use Signal Protocol / ECDH key exchange.
+@Serializable
+private data class ConvInsertRow(
+    val type: String,
+    @SerialName("created_by") val createdBy: String
+)
 
-private object MessageCrypto {
-    private const val ALGORITHM = "AES/CBC/PKCS5Padding"
+@Serializable
+private data class MemberInsertRow(
+    @SerialName("conversation_id") val conversationId: String,
+    @SerialName("user_id")         val userId: String
+)
 
-    private fun deriveKey(userId1: String, userId2: String): ByteArray {
-        val sorted = listOf(userId1, userId2).sorted().joinToString("")
-        val hash   = java.security.MessageDigest.getInstance("SHA-256").digest(sorted.toByteArray())
-        return hash.copyOf(32) // 256-bit key
+@Serializable
+private data class ConvUpdateRow(
+    @SerialName("last_message")    val lastMessage: String,
+    @SerialName("last_message_at") val lastMessageAt: String
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Encryption — AES-256-CBC, key = SHA-256(sort(uid1+uid2))
+// ─────────────────────────────────────────────────────────────────────────────
+
+private object Crypto {
+    private const val ALG = "AES/CBC/PKCS5Padding"
+
+    private fun key(a: String, b: String): ByteArray {
+        val sorted = listOf(a, b).sorted().joinToString("|")
+        return java.security.MessageDigest.getInstance("SHA-256")
+            .digest(sorted.toByteArray())
+            .copyOf(32)
     }
 
-    fun encrypt(plaintext: String, userId1: String, userId2: String): String {
-        return try {
-            val key    = deriveKey(userId1, userId2)
-            val cipher = Cipher.getInstance(ALGORITHM)
-            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
-            val iv         = cipher.iv
-            val encrypted  = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
-            val combined   = iv + encrypted
-            Base64.getEncoder().encodeToString(combined)
-        } catch (_: Exception) { plaintext } // graceful fallback
-    }
+    fun encrypt(plain: String, a: String, b: String): String = runCatching {
+        val k = SecretKeySpec(key(a, b), "AES")
+        val c = Cipher.getInstance(ALG).also { it.init(Cipher.ENCRYPT_MODE, k) }
+        val enc = c.doFinal(plain.toByteArray(Charsets.UTF_8))
+        Base64.getEncoder().encodeToString(c.iv + enc)
+    }.getOrDefault(plain)
 
-    fun decrypt(ciphertext: String, userId1: String, userId2: String): String {
-        return try {
-            val key      = deriveKey(userId1, userId2)
-            val combined = Base64.getDecoder().decode(ciphertext)
-            val iv       = combined.copyOfRange(0, 16)
-            val data     = combined.copyOfRange(16, combined.size)
-            val cipher   = Cipher.getInstance(ALGORITHM)
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-            String(cipher.doFinal(data), Charsets.UTF_8)
-        } catch (_: Exception) { "[encrypted message]" } // if key mismatch
-    }
+    fun decrypt(cipher: String, a: String, b: String): String = runCatching {
+        val k    = SecretKeySpec(key(a, b), "AES")
+        val raw  = Base64.getDecoder().decode(cipher)
+        val iv   = raw.copyOfRange(0, 16)
+        val data = raw.copyOfRange(16, raw.size)
+        val c    = Cipher.getInstance(ALG).also { it.init(Cipher.DECRYPT_MODE, k, IvParameterSpec(iv)) }
+        String(c.doFinal(data), Charsets.UTF_8)
+    }.getOrDefault("[encrypted]")
 }
 
-// ── Repository ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Repository
+// ─────────────────────────────────────────────────────────────────────────────
 
 class ChatRepository(
-    private val authRepository: AuthRepository = AuthRepository()
+    private val auth: AuthRepository = AuthRepository()
 ) {
-    private val supabase = SupabaseProvider.client
-    private fun uid()    = authRepository.currentUserId() ?: error("Not authenticated")
+    private val db = SupabaseProvider.client
+    private fun me() = auth.currentUserId() ?: error("Not signed in")
+    private fun now() = java.time.Instant.now().toString()
 
     // ── Conversations ─────────────────────────────────────────────────────────
 
     suspend fun fetchConversations(): List<ConversationItem> {
-        val myUid = uid()
-        return try {
-            // Get conversation IDs the current user is a member of
-            @Serializable data class MemberRow(
-                @SerialName("conversation_id") val conversationId: String
-            )
-            val memberRows = supabase.from("conversation_members")
-                .select(Columns.raw("conversation_id")) {
-                    filter { eq("user_id", myUid) }
-                }
-                .decodeList<MemberRow>()
+        val uid = me()
+        // 1. Get conversation IDs I'm a member of
+        val myConvIds = runCatching {
+            db.from("conversation_members")
+                .select(Columns.raw("conversation_id")) { filter { eq("user_id", uid) } }
+                .decodeList<MemberConvRow>()
+                .map { it.conversationId }
+        }.getOrDefault(emptyList())
 
-            val ids = memberRows.map { it.conversationId }
-            if (ids.isEmpty()) return emptyList()
+        if (myConvIds.isEmpty()) return emptyList()
 
-            supabase.from("conversations")
-                .select {
-                    filter { isIn("id", ids) }
-                    order("last_message_at", order = Order.DESCENDING)
-                }
-                .decodeList<ConversationRow>()
-                .map { row ->
-                    // For direct chats, find the other user's name/avatar
-                    ConversationItem(
-                        id            = row.id,
-                        type          = row.type,
-                        name          = row.name,
-                        avatarUrl     = row.avatarUrl,
-                        lastMessage   = row.lastMessage,
-                        lastMessageAt = row.lastMessageAt
-                    )
-                }
-        } catch (_: Exception) { emptyList() }
+        // 2. For each conv, find the other member and load conversation row
+        return runCatching {
+            myConvIds.mapNotNull { convId ->
+                val conv = runCatching {
+                    db.from("conversations")
+                        .select { filter { eq("id", convId) } }
+                        .decodeSingle<ConvRow>()
+                }.getOrNull() ?: return@mapNotNull null
+
+                // Find the other user in this conversation
+                val otherMember = runCatching {
+                    db.from("conversation_members")
+                        .select { filter { eq("conversation_id", convId); neq("user_id", uid) } }
+                        .decodeList<MemberRow>()
+                        .firstOrNull()
+                }.getOrNull()
+
+                val otherUserId = otherMember?.userId ?: ""
+
+                // Load their profile for name/avatar
+                val otherProfile = if (otherUserId.isNotBlank()) {
+                    runCatching {
+                        db.from("profiles")
+                            .select { filter { eq("id", otherUserId) } }
+                            .decodeSingle<ProfileRow>()
+                    }.getOrNull()
+                } else null
+
+                ConversationItem(
+                    id            = conv.id,
+                    type          = conv.type,
+                    name          = otherProfile?.displayName ?: otherProfile?.username ?: conv.name,
+                    avatarUrl     = otherProfile?.avatarUrl ?: conv.avatarUrl,
+                    lastMessage   = conv.lastMessage,
+                    lastMessageAt = conv.lastMessageAt,
+                    otherUserId   = otherUserId
+                )
+            }.sortedByDescending { it.lastMessageAt }
+        }.getOrDefault(emptyList())
     }
 
     suspend fun getOrCreateDirectConversation(otherUserId: String): String {
-        val myUid = uid()
-        // Check if a direct conversation already exists
-        return try {
-            @Serializable data class ConvIdRow(val id: String)
-            @Serializable data class MemberConvRow(@SerialName("conversation_id") val conversationId: String)
-
-            // Find conversations where both users are members
-            val mine   = supabase.from("conversation_members")
-                .select(Columns.raw("conversation_id")) { filter { eq("user_id", myUid) } }
-                .decodeList<MemberConvRow>().map { it.conversationId }
-            val theirs = supabase.from("conversation_members")
+        val uid = me()
+        // Find existing shared conversation
+        return runCatching {
+            val mine  = db.from("conversation_members")
+                .select(Columns.raw("conversation_id")) { filter { eq("user_id", uid) } }
+                .decodeList<MemberConvRow>().map { it.conversationId }.toSet()
+            val theirs = db.from("conversation_members")
                 .select(Columns.raw("conversation_id")) { filter { eq("user_id", otherUserId) } }
-                .decodeList<MemberConvRow>().map { it.conversationId }
+                .decodeList<MemberConvRow>().map { it.conversationId }.toSet()
 
-            val common = mine.intersect(theirs.toSet())
-            if (common.isNotEmpty()) {
-                return common.first()
-            }
+            val shared = mine.intersect(theirs)
+            if (shared.isNotEmpty()) return shared.first()
 
-            // Create new conversation
-            val conv = supabase.from("conversations")
-                .insert(mapOf("type" to "direct", "created_by" to myUid)) { select() }
-                .decodeSingle<ConversationRow>()
-
-            // Add both members
-            supabase.from("conversation_members").insert(
-                listOf(
-                    mapOf("conversation_id" to conv.id, "user_id" to myUid),
-                    mapOf("conversation_id" to conv.id, "user_id" to otherUserId)
-                )
-            )
+            // Create new
+            val conv = db.from("conversations")
+                .insert(ConvInsertRow(type = "direct", createdBy = uid)) { select() }
+                .decodeSingle<ConvRow>()
+            db.from("conversation_members").insert(listOf(
+                MemberInsertRow(conv.id, uid),
+                MemberInsertRow(conv.id, otherUserId)
+            ))
             conv.id
-        } catch (_: Exception) { "" }
+        }.getOrDefault("")
     }
 
     // ── Messages ──────────────────────────────────────────────────────────────
 
-    suspend fun fetchMessages(conversationId: String, otherUserId: String): List<MessageItem> {
-        val myUid = uid()
-        return try {
-            supabase.from("messages")
+    suspend fun fetchMessages(convId: String, otherUserId: String): List<MessageItem> {
+        val uid = me()
+        return runCatching {
+            db.from("messages")
                 .select {
-                    filter { eq("conversation_id", conversationId); eq("is_deleted", false) }
-                    order("created_at", order = Order.ASCENDING)
+                    filter { eq("conversation_id", convId); eq("is_deleted", false) }
+                    order("created_at", Order.ASCENDING)
                     limit(100)
                 }
-                .decodeList<MessageRow>()
-                .map { row ->
-                    val decryptedBody = row.body?.let {
-                        if (row.messageType == "text") {
-                            MessageCrypto.decrypt(it, myUid, otherUserId)
-                        } else it
-                    }
+                .decodeList<MsgRow>()
+                .map { r ->
+                    val decBody = if (r.messageType == "text" && r.body != null)
+                        Crypto.decrypt(r.body, uid, otherUserId)
+                    else r.body
                     MessageItem(
-                        id             = row.id,
-                        conversationId = row.conversationId,
-                        senderId       = row.senderId,
-                        body           = decryptedBody,
-                        messageType    = row.messageType,
-                        fileUrl        = row.fileUrl,
-                        fileName       = row.fileName,
-                        isMe           = row.senderId == myUid,
-                        createdAt      = row.createdAt,
-                        isDeleted      = row.isDeleted
+                        id             = r.id,
+                        conversationId = r.conversationId,
+                        senderId       = r.senderId,
+                        body           = decBody,
+                        messageType    = r.messageType,
+                        fileUrl        = r.fileUrl,
+                        fileName       = r.fileName,
+                        isMe           = r.senderId == uid,
+                        createdAt      = r.createdAt,
+                        isDeleted      = r.isDeleted
                     )
                 }
-        } catch (_: Exception) { emptyList() }
+        }.getOrDefault(emptyList())
     }
 
-    suspend fun sendTextMessage(conversationId: String, text: String, otherUserId: String) {
-        val myUid   = uid()
-        val encrypted = MessageCrypto.encrypt(text, myUid, otherUserId)
-        supabase.from("messages").insert(
-            MessageInsert(conversationId = conversationId, senderId = myUid, body = encrypted, messageType = "text")
-        )
-        // Update last_message on conversation
-        supabase.from("conversations").update({
-            set("last_message", text.take(60))
-            set("last_message_at", java.time.Instant.now().toString())
-        }) { filter { eq("id", conversationId) } }
+    suspend fun sendText(convId: String, text: String, otherUserId: String) {
+        val uid = me()
+        val enc = Crypto.encrypt(text, uid, otherUserId)
+        db.from("messages").insert(MsgInsert(convId, uid, body = enc, messageType = "text"))
+        db.from("conversations").update(ConvUpdateRow(text.take(60), now())) {
+            filter { eq("id", convId) }
+        }
     }
 
-    suspend fun sendFileMessage(context: Context, conversationId: String, fileUri: Uri, otherUserId: String) {
-        val myUid    = uid()
-        val fileName = fileUri.lastPathSegment ?: "file"
-        val bytes    = context.contentResolver.openInputStream(fileUri)?.readBytes() ?: return
-        val path     = "$myUid/chat/${System.currentTimeMillis()}_$fileName"
-        supabase.storage.from("conekt-files").upload(path, bytes) { upsert = true }
-        val url = supabase.storage.from("conekt-files").publicUrl(path)
-        val mimeType = context.contentResolver.getType(fileUri) ?: ""
+    suspend fun sendFile(context: Context, convId: String, uri: Uri, otherUserId: String) {
+        val uid      = me()
+        val mime     = context.contentResolver.getType(uri) ?: ""
+        val name     = uri.lastPathSegment ?: "file"
+        val bytes    = context.contentResolver.openInputStream(uri)?.readBytes() ?: return
+        val path     = "$uid/chat/${System.currentTimeMillis()}_$name"
+
+        db.storage.from("conekt-files").upload(path, bytes) { upsert = true }
+        val url = db.storage.from("conekt-files").publicUrl(path)
+
         val msgType = when {
-            mimeType.startsWith("image") -> "image"
-            mimeType.startsWith("audio") -> "audio"
+            mime.startsWith("image") -> "image"
+            mime.startsWith("audio") -> "audio"
             else -> "file"
         }
-        supabase.from("messages").insert(
-            MessageInsert(conversationId = conversationId, senderId = myUid, body = null, messageType = msgType, fileUrl = url, fileName = fileName)
-        )
-        supabase.from("conversations").update({
-            set("last_message", "📎 $fileName")
-            set("last_message_at", java.time.Instant.now().toString())
-        }) { filter { eq("id", conversationId) } }
+        db.from("messages").insert(MsgInsert(convId, uid, messageType = msgType, fileUrl = url, fileName = name))
+        db.from("conversations").update(ConvUpdateRow("📎 $name", now())) {
+            filter { eq("id", convId) }
+        }
     }
 
-    suspend fun sendMusicMessage(conversationId: String, trackId: String, trackTitle: String, artist: String, coverUrl: String?, fileUrl: String) {
-        val myUid = uid()
-        val body  = """{"trackId":"$trackId","title":"$trackTitle","artist":"$artist","coverUrl":"${coverUrl.orEmpty()}","fileUrl":"$fileUrl"}"""
-        supabase.from("messages").insert(
-            MessageInsert(conversationId = conversationId, senderId = myUid, body = body, messageType = "music")
-        )
-        supabase.from("conversations").update({
-            set("last_message", "🎵 $trackTitle")
-            set("last_message_at", java.time.Instant.now().toString())
-        }) { filter { eq("id", conversationId) } }
+    suspend fun sendMusicTrack(convId: String, trackId: String, title: String, artist: String, coverUrl: String?, fileUrl: String) {
+        val uid  = me()
+        val body = """{"trackId":"$trackId","title":"${title.replace("\"","'")}","artist":"${artist.replace("\"","'")}","coverUrl":"${coverUrl.orEmpty()}","fileUrl":"$fileUrl"}"""
+        db.from("messages").insert(MsgInsert(convId, uid, body = body, messageType = "music"))
+        db.from("conversations").update(ConvUpdateRow("🎵 $title", now())) {
+            filter { eq("id", convId) }
+        }
     }
 
     suspend fun deleteMessage(messageId: String) {
-        supabase.from("messages").update({ set("is_deleted", true) }) { filter { eq("id", messageId) } }
+        db.from("messages").update({ set("is_deleted", true) }) {
+            filter { eq("id", messageId) }
+        }
     }
 
     // ── Stories ───────────────────────────────────────────────────────────────
 
-    suspend fun fetchStories(): List<StoryItem> {
-        val columns = Columns.raw("""
-            id, author_id, media_url, media_type, caption, expires_at, created_at,
+    suspend fun fetchStories(): List<StoryPreview> {
+        val cols = Columns.raw("""
+            id, author_id, media_url, media_type, caption, expires_at,
             author:profiles!stories_author_id_fkey(id, username, display_name, avatar_url)
         """.trimIndent())
-        return try {
-            supabase.from("stories")
-                .select(columns) {
-                    filter { gt("expires_at", java.time.Instant.now().toString()) }
-                    order("created_at", order = Order.DESCENDING)
+        return runCatching {
+            db.from("stories")
+                .select(cols) {
+                    filter { gt("expires_at", now()) }
+                    order("created_at", Order.DESCENDING)
                     limit(30)
                 }
                 .decodeList<StoryRow>()
-                .map { row ->
-                    StoryItem(
-                        id         = row.id,
-                        authorId   = row.authorId,
-                        authorName = row.author.displayName ?: row.author.username,
-                        avatarUrl  = row.author.avatarUrl,
-                        mediaUrl   = row.mediaUrl,
-                        mediaType  = row.mediaType,
-                        caption    = row.caption,
-                        expiresAt  = row.expiresAt
+                .map { r ->
+                    StoryPreview(
+                        id         = r.id,
+                        authorId   = r.authorId,
+                        authorName = r.author.displayName ?: r.author.username,
+                        avatarUrl  = r.author.avatarUrl,
+                        mediaUrl   = r.mediaUrl,
+                        caption    = r.caption
                     )
                 }
-        } catch (_: Exception) { emptyList() }
+        }.getOrDefault(emptyList())
     }
 
     // ── People search ─────────────────────────────────────────────────────────
 
-    suspend fun searchUsers(query: String): List<UserProfile> {
-        return try {
-            supabase.from("profiles")
-                .select {
-                    filter {
-                        or {
-                            ilike("username",     "%$query%")
-                            ilike("display_name", "%$query%")
-                        }
+    suspend fun searchUsers(q: String): List<UserSearchResult> = runCatching {
+        db.from("profiles")
+            .select {
+                filter {
+                    or {
+                        ilike("username",     "%$q%")
+                        ilike("display_name", "%$q%")
                     }
-                    limit(20)
                 }
-                .decodeList<ProfileRow>()
-                .map { it.toUserProfile() }
-        } catch (_: Exception) { emptyList() }
-    }
+                limit(20)
+            }
+            .decodeList<ProfileRow>()
+            .map { r ->
+                UserSearchResult(r.id, r.username, r.displayName, r.avatarUrl, r.bio)
+            }
+    }.getOrDefault(emptyList())
 
-    suspend fun fetchUserProfile(userId: String): UserProfile? {
-        val myUid = uid()
-        return try {
-            val row = supabase.from("profiles")
-                .select { filter { eq("id", userId) } }
-                .decodeSingle<ProfileRow>()
-            val isFollowing = try {
-                supabase.from("follows").select {
-                    filter { eq("follower_id", myUid); eq("following_id", userId) }
-                }.decodeList<FollowRow>().isNotEmpty()
-            } catch (_: Exception) { false }
-            row.toUserProfile(isFollowing)
-        } catch (_: Exception) { null }
-    }
+    suspend fun fetchUserProfile(userId: String): FullUserProfile? = runCatching {
+        val uid = me()
+        val r = db.from("profiles")
+            .select { filter { eq("id", userId) } }
+            .decodeSingle<ProfileRow>()
+        val following = runCatching {
+            db.from("follows")
+                .select { filter { eq("follower_id", uid); eq("following_id", userId) } }
+                .decodeList<FollowCheckRow>()
+                .isNotEmpty()
+        }.getOrDefault(false)
+        FullUserProfile(r.id, r.username, r.displayName, r.avatarUrl, r.bannerUrl, r.bio, r.isVerified, r.isPrivate, r.followerCount, r.followingCount, following)
+    }.getOrNull()
 
     suspend fun followUser(userId: String) {
-        supabase.from("follows").upsert(FollowRow(followerId = uid(), followingId = userId))
+        db.from("follows").upsert(
+            FollowCheckRow(followerId = me(), followingId = userId)
+        )
     }
 
     suspend fun unfollowUser(userId: String) {
-        supabase.from("follows").delete {
-            filter { eq("follower_id", uid()); eq("following_id", userId) }
+        db.from("follows").delete {
+            filter { eq("follower_id", me()); eq("following_id", userId) }
         }
     }
-
-    private fun ProfileRow.toUserProfile(isFollowing: Boolean = false) = UserProfile(
-        id             = id,
-        username       = username,
-        displayName    = displayName,
-        avatarUrl      = avatarUrl,
-        bannerUrl      = bannerUrl,
-        bio            = bio,
-        isVerified     = isVerified,
-        isPrivate      = isPrivate,
-        followerCount  = followerCount,
-        followingCount = followingCount,
-        isFollowing    = isFollowing
-    )
 }

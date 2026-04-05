@@ -32,43 +32,67 @@ fun ConektNavHost(
     musicViewModel:   MusicViewModel,
     modifier:         Modifier = Modifier
 ) {
-    NavHost(navController = navController, startDestination = startDestination, modifier = modifier) {
+    NavHost(
+        navController    = navController,
+        startDestination = startDestination,
+        modifier         = modifier
+    ) {
 
+        // ── Auth ──────────────────────────────────────────────────────────────
         composable(AppRoutes.AUTH) {
             AuthScreen(
-                onSignInSuccess = { navController.navigate(Routes.PULSE) { popUpTo(AppRoutes.AUTH) { inclusive = true } } },
-                onSignUpSuccess = { navController.navigate(Routes.PHONE_SETUP) { popUpTo(AppRoutes.AUTH) { inclusive = true } } }
+                onSignInSuccess = {
+                    navController.navigate(Routes.PULSE) {
+                        popUpTo(AppRoutes.AUTH) { inclusive = true }
+                    }
+                },
+                onSignUpSuccess = {
+                    navController.navigate(Routes.PHONE_SETUP) {
+                        popUpTo(AppRoutes.AUTH) { inclusive = true }
+                    }
+                }
             )
         }
 
         composable(Routes.PHONE_SETUP) {
             PhoneSetupScreen(onComplete = {
-                navController.navigate(Routes.PULSE) { popUpTo(Routes.PHONE_SETUP) { inclusive = true } }
+                navController.navigate(Routes.PULSE) {
+                    popUpTo(Routes.PHONE_SETUP) { inclusive = true }
+                }
             })
         }
 
+        // ── Pulse (Home) ──────────────────────────────────────────────────────
         composable(Routes.PULSE) {
             PulseScreen(
                 onCreatePostClick = { navController.navigate(Routes.CREATE_POST) },
                 onOpenChat        = { navController.navigate(Routes.CHAT) },
-                onOpenUserProfile = { userId -> navController.navigate(Routes.userProfile(userId)) }
+                onOpenUserProfile = { userId ->
+                    navController.navigate(Routes.userProfile(userId))
+                }
             )
         }
 
         composable(Routes.CREATE_POST) {
-            CreatePostScreen(onBack = { navController.popBackStack() }, onSuccess = { navController.popBackStack() })
+            CreatePostScreen(
+                onBack    = { navController.popBackStack() },
+                onSuccess = { navController.popBackStack() }
+            )
         }
 
-        // ── Chat ──────────────────────────────────────────────────────────────
+        // ── Chat list ─────────────────────────────────────────────────────────
         composable(Routes.CHAT) {
             ChatListScreen(
                 onOpenThread  = { convId, otherId, name, avatar ->
                     navController.navigate(Routes.chatThread(convId, otherId, name))
                 },
-                onOpenProfile = { userId -> navController.navigate(Routes.userProfile(userId)) }
+                onOpenProfile = { userId ->
+                    navController.navigate(Routes.userProfile(userId))
+                }
             )
         }
 
+        // ── Chat thread ───────────────────────────────────────────────────────
         composable(
             route     = Routes.CHAT_THREAD,
             arguments = listOf(
@@ -79,17 +103,19 @@ fun ConektNavHost(
         ) { back ->
             val convId  = back.arguments?.getString("convId")  ?: ""
             val otherId = back.arguments?.getString("otherId") ?: ""
-            val name    = java.net.URLDecoder.decode(back.arguments?.getString("name") ?: "", "UTF-8")
+            val rawName = back.arguments?.getString("name")    ?: ""
+            val name    = runCatching { java.net.URLDecoder.decode(rawName, "UTF-8") }.getOrDefault(rawName)
             ChatThreadScreen(
-                conversationId  = convId,
-                otherUserId     = otherId,
-                otherName       = name,
-                otherAvatarUrl  = null,
-                onBack          = { navController.popBackStack() },
-                onOpenProfile   = { userId -> navController.navigate(Routes.userProfile(userId)) }
+                conversationId = convId,
+                otherUserId    = otherId,
+                otherName      = name,
+                otherAvatarUrl = null,
+                onBack         = { navController.popBackStack() },
+                onOpenProfile  = { userId -> navController.navigate(Routes.userProfile(userId)) }
             )
         }
 
+        // ── User profile (other users) ────────────────────────────────────────
         composable(
             route     = Routes.USER_PROFILE,
             arguments = listOf(navArgument("userId") { type = NavType.StringType })
@@ -104,7 +130,7 @@ fun ConektNavHost(
             )
         }
 
-        // ── Other screens ─────────────────────────────────────────────────────
+        // ── Main screens ──────────────────────────────────────────────────────
         composable(Routes.VAULT)  { VaultScreen() }
         composable(Routes.CANVAS) { CanvasScreen() }
         composable(Routes.MUSIC)  { MusicScreen(viewModel = musicViewModel) }

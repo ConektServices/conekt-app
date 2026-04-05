@@ -12,7 +12,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-// ── Chat list ViewModel ───────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Chat list
+// ─────────────────────────────────────────────────────────────────────────────
 
 class ChatListViewModel(
     private val repo: ChatRepository = ChatRepository()
@@ -25,7 +27,7 @@ class ChatListViewModel(
 
     fun refresh() {
         viewModelScope.launch {
-            _state.value = _state.value.copy(isLoading = true)
+            _state.value = _state.value.copy(isLoading = true, error = null)
             val convs   = safe { repo.fetchConversations() } ?: emptyList()
             val stories = safe { repo.fetchStories() }       ?: emptyList()
             _state.value = _state.value.copy(isLoading = false, conversations = convs, stories = stories)
@@ -33,20 +35,30 @@ class ChatListViewModel(
     }
 
     fun onSearchQueryChange(q: String) {
-        _state.value = _state.value.copy(searchQuery = q)
-        if (q.isBlank()) { _state.value = _state.value.copy(searchResults = emptyList()); return }
+        _state.value = _state.value.copy(searchQuery = q, searchResults = emptyList())
+        if (q.isBlank()) return
         viewModelScope.launch {
+            _state.value = _state.value.copy(isSearching = true)
             val results = safe { repo.searchUsers(q) } ?: emptyList()
-            _state.value = _state.value.copy(searchResults = results)
+            _state.value = _state.value.copy(isSearching = false, searchResults = results)
         }
     }
 
-    fun clearSearch() = _state.value.copy(searchQuery = "", searchResults = emptyList()).also { _state.value = it }
+    fun clearSearch() {
+        _state.value = _state.value.copy(searchQuery = "", searchResults = emptyList())
+    }
 
-    private suspend fun <T> safe(block: suspend () -> T): T? = try { block() } catch (_: Exception) { null }
+    /** Returns the conversation ID for a direct chat with userId (creating if needed). */
+    suspend fun openOrCreateDm(userId: String): String =
+        safe { repo.getOrCreateDirectConversation(userId) } ?: ""
+
+    private suspend fun <T> safe(block: suspend () -> T): T? =
+        runCatching { block() }.getOrNull()
 }
 
-// ── Chat thread ViewModel ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Chat thread
+// ─────────────────────────────────────────────────────────────────────────────
 
 class ChatThreadViewModel(
     private val repo: ChatRepository = ChatRepository()
@@ -55,27 +67,22 @@ class ChatThreadViewModel(
     private val _state = MutableStateFlow(ChatThreadUiState())
     val state: StateFlow<ChatThreadUiState> = _state.asStateFlow()
 
-    private var conversationId: String = ""
-    private var otherUserId:    String = ""
-    private var pollJob:        Job?   = null
+    private var convId:      String = ""
+    private var otherUserId: String = ""
+    private var pollJob:     Job?   = null
 
-    fun init(convId: String, otherId: String) {
-        conversationId = convId
-        otherUserId    = otherId
+    fun init(conversationId: String, otherId: String) {
+        convId      = conversationId
+        otherUserId = otherId
         loadMessages()
         startPolling()
-    }
-
-    /** Open a DM with a user — creates conversation if needed */
-    suspend fun openDirectWith(userId: String): String {
-        return try { repo.getOrCreateDirectConversation(userId) } catch (_: Exception) { "" }
     }
 
     private fun loadMessages() {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true)
-            val messages = safe { repo.fetchMessages(conversationId, otherUserId) } ?: emptyList()
-            _state.value = _state.value.copy(isLoading = false, messages = messages)
+            val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: emptyList()
+            _state.value = _state.value.copy(isLoading = false, messages = msgs)
         }
     }
 
@@ -84,8 +91,8 @@ class ChatThreadViewModel(
         pollJob = viewModelScope.launch {
             while (true) {
                 delay(3_000)
-                val messages = safe { repo.fetchMessages(conversationId, otherUserId) } ?: continue
-                _state.value = _state.value.copy(messages = messages)
+                val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: continue
+                _state.value = _state.value.copy(messages = msgs)
             }
         }
     }
@@ -96,35 +103,39 @@ class ChatThreadViewModel(
 
     fun sendText() {
         val text = _state.value.draft.trim()
-        if (text.isBlank()) return
+        if (text.isBlank() || convId.isBlank()) return
         _state.value = _state.value.copy(draft = "", isSending = true)
         viewModelScope.launch {
-            safe { repo.sendTextMessage(conversationId, text, otherUserId) }
-            loadMessages()
-            _state.value = _state.value.copy(isSending = false)
+            safe { repo.sendText(convId, text, otherUserId) }
+            val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: emptyList()
+            _state.value = _state.value.copy(isSending = false, messages = msgs)
         }
     }
 
     fun sendFile(context: Context, uri: Uri) {
+        if (convId.isBlank()) return
         _state.value = _state.value.copy(isSending = true)
         viewModelScope.launch {
-            safe { repo.sendFileMessage(context, conversationId, uri, otherUserId) }
-            loadMessages()
-            _state.value = _state.value.copy(isSending = false)
+            safe { repo.sendFile(context, convId, uri, otherUserId) }
+            val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: emptyList()
+            _state.value = _state.value.copy(isSending = false, messages = msgs)
         }
     }
 
-    fun sendMusic(trackId: String, title: String, artist: String, coverUrl: String?, fileUrl: String) {
+    fun sendMusicTrack(trackId: String, title: String, artist: String, coverUrl: String?, fileUrl: String) {
+        if (convId.isBlank()) return
         viewModelScope.launch {
-            safe { repo.sendMusicMessage(conversationId, trackId, title, artist, coverUrl, fileUrl) }
-            loadMessages()
+            safe { repo.sendMusicTrack(convId, trackId, title, artist, coverUrl, fileUrl) }
+            val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: emptyList()
+            _state.value = _state.value.copy(messages = msgs)
         }
     }
 
     fun deleteMessage(messageId: String) {
         viewModelScope.launch {
             safe { repo.deleteMessage(messageId) }
-            loadMessages()
+            val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: emptyList()
+            _state.value = _state.value.copy(messages = msgs)
         }
     }
 
@@ -133,10 +144,13 @@ class ChatThreadViewModel(
         pollJob?.cancel()
     }
 
-    private suspend fun <T> safe(block: suspend () -> T): T? = try { block() } catch (_: Exception) { null }
+    private suspend fun <T> safe(block: suspend () -> T): T? =
+        runCatching { block() }.getOrNull()
 }
 
-// ── User profile ViewModel ────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// User profile
+// ─────────────────────────────────────────────────────────────────────────────
 
 class UserProfileViewModel(
     private val repo: ChatRepository = ChatRepository()
@@ -148,19 +162,24 @@ class UserProfileViewModel(
     fun load(userId: String) {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true)
-            val profile = safe { repo.fetchUserProfile(userId) }
-            _state.value = _state.value.copy(isLoading = false, profile = profile, isFollowing = profile?.isFollowing ?: false)
+            val p = safe { repo.fetchUserProfile(userId) }
+            _state.value = _state.value.copy(isLoading = false, profile = p, isFollowing = p?.isFollowing ?: false)
         }
     }
 
     fun toggleFollow(userId: String) {
-        val currently = _state.value.isFollowing
-        _state.value = _state.value.copy(isFollowing = !currently)
+        val was = _state.value.isFollowing
+        // Optimistic update
+        _state.value = _state.value.copy(isFollowing = !was)
         viewModelScope.launch {
-            if (currently) safe { repo.unfollowUser(userId) }
-            else           safe { repo.followUser(userId) }
+            if (was) safe { repo.unfollowUser(userId) }
+            else     safe { repo.followUser(userId) }
         }
     }
 
-    private suspend fun <T> safe(block: suspend () -> T): T? = try { block() } catch (_: Exception) { null }
+    suspend fun getOrCreateDm(userId: String): String =
+        safe { repo.getOrCreateDirectConversation(userId) } ?: ""
+
+    private suspend fun <T> safe(block: suspend () -> T): T? =
+        runCatching { block() }.getOrNull()
 }
