@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.conekt.suite.data.repository.ChatRepository
+import com.conekt.suite.data.repository.ProfileRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,7 +45,7 @@ class ChatListViewModel(private val repo: ChatRepository = ChatRepository()) : V
         _state.value = _state.value.copy(query = "", searchResults = emptyList(), isSearching = false)
     }
 
-    /** Open or create a DM with userId. Returns the conversation ID. */
+    /** Creates or opens a DM conversation. Returns the conversation ID, or "" on failure. */
     suspend fun openOrCreateDm(userId: String): String =
         safe { repo.getOrCreateDm(userId) } ?: ""
 
@@ -58,14 +59,14 @@ class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) :
     private val _state = MutableStateFlow(ChatThreadState())
     val state: StateFlow<ChatThreadState> = _state.asStateFlow()
 
-    private var convId       = ""
-    private var otherUserId  = ""
+    private var convId      = ""
+    private var otherUserId = ""
     private var pollJob: Job? = null
     private var initialized  = false
 
-    /** Call once with the conversation and other-user IDs. Safe to call multiple times. */
     fun init(conversationId: String, otherId: String) {
-        if (initialized && convId == conversationId) return   // already set up for this conv
+        // If already initialized for this conversation, skip re-init
+        if (initialized && convId == conversationId) return
         initialized  = true
         convId       = conversationId
         otherUserId  = otherId
@@ -84,6 +85,7 @@ class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) :
     }
 
     private fun startPolling() {
+        pollJob?.cancel()
         pollJob = viewModelScope.launch {
             while (true) {
                 delay(3_000)
@@ -112,7 +114,7 @@ class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) :
         _state.value = _state.value.copy(draft = _state.value.draft + emoji, showEmoji = false)
     }
 
-    // ── Send actions ──────────────────────────────────────────────────────────
+    // ── Send ──────────────────────────────────────────────────────────────────
 
     fun sendText() {
         val text = _state.value.draft.trim()
@@ -120,7 +122,7 @@ class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) :
         _state.value = _state.value.copy(draft = "", isSending = true, showEmoji = false)
         viewModelScope.launch {
             safe { repo.sendText(convId, text, otherUserId) }
-            refresh()
+            refreshMessages()
             _state.value = _state.value.copy(isSending = false)
         }
     }
@@ -130,7 +132,7 @@ class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) :
         _state.value = _state.value.copy(isSending = true, showAttach = false)
         viewModelScope.launch {
             safe { repo.sendFile(context, convId, uri, otherUserId) }
-            refresh()
+            refreshMessages()
             _state.value = _state.value.copy(isSending = false)
         }
     }
@@ -140,18 +142,18 @@ class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) :
         _state.value = _state.value.copy(showAttach = false)
         viewModelScope.launch {
             safe { repo.sendMusic(convId, trackId, title, artist, coverUrl, fileUrl) }
-            refresh()
+            refreshMessages()
         }
     }
 
     fun deleteMessage(msgId: String) {
         viewModelScope.launch {
             safe { repo.deleteMessage(msgId) }
-            refresh()
+            refreshMessages()
         }
     }
 
-    private suspend fun refresh() {
+    private suspend fun refreshMessages() {
         val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: return
         _state.value = _state.value.copy(messages = msgs)
     }
@@ -166,31 +168,56 @@ class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) :
 
 // ── User profile ──────────────────────────────────────────────────────────────
 
-class UserProfileViewModel(private val repo: ChatRepository = ChatRepository()) : ViewModel() {
+class UserProfileViewModel(
+    private val chatRepo:    ChatRepository    = ChatRepository(),
+    private val profileRepo: ProfileRepository = ProfileRepository()
+) : ViewModel() {
 
     private val _state = MutableStateFlow(UserProfileState())
     val state: StateFlow<UserProfileState> = _state.asStateFlow()
 
+    /** Load a user's profile AND their public posts */
     fun load(userId: String) {
         viewModelScope.launch {
-            _state.value = _state.value.copy(isLoading = true)
-            val p = safe { repo.fetchProfile(userId) }
-            _state.value = _state.value.copy(isLoading = false, profile = p, isFollowing = p?.isFollowing ?: false)
+            _state.value = _state.value.copy(isLoading = true, error = null)
+
+            // Load profile info (includes follower/following counts, isVerified, etc.)
+            val profile = safe { chatRepo.fetchProfile(userId) }
+
+            // Load their public posts so we can display them
+            val posts = safe { profileRepo.getPublicProfilePosts(userId) } ?: emptyList()
+
+            _state.value = _state.value.copy(
+                isLoading   = false,
+                profile     = profile,
+                posts       = posts,
+                isFollowing = profile?.isFollowing ?: false,
+                error       = if (profile == null) "Could not load profile." else null
+            )
         }
     }
 
     fun toggleFollow(userId: String) {
-        val was = _state.value.isFollowing
-        _state.value = _state.value.copy(isFollowing = !was)
+        val wasFollowing = _state.value.isFollowing
+        // Optimistic update
+        val currentProfile = _state.value.profile
+        _state.value = _state.value.copy(
+            isFollowing = !wasFollowing,
+            profile = currentProfile?.copy(
+                followerCount = if (wasFollowing) currentProfile.followerCount - 1
+                else currentProfile.followerCount + 1
+            )
+        )
         viewModelScope.launch {
-            if (was) safe { repo.unfollow(userId) } else safe { repo.follow(userId) }
+            if (wasFollowing) safe { chatRepo.unfollow(userId) }
+            else safe { chatRepo.follow(userId) }
         }
     }
 
     fun startDm(userId: String, onReady: (convId: String) -> Unit) {
         _state.value = _state.value.copy(isDmLoading = true)
         viewModelScope.launch {
-            val convId = safe { repo.getOrCreateDm(userId) } ?: ""
+            val convId = safe { chatRepo.getOrCreateDm(userId) } ?: ""
             _state.value = _state.value.copy(isDmLoading = false, dmConvId = convId)
             if (convId.isNotBlank()) onReady(convId)
         }
