@@ -3,7 +3,7 @@ package com.conekt.suite.data.repository
 import io.github.jan.supabase.auth.providers.builtin.Email
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import com.conekt.suite.data.remote.SupabaseProvider
+import com.conekt.suite.core.supabase.SupabaseProvider   // ← single provider now
 import io.github.jan.supabase.auth.auth
 
 class AuthRepository {

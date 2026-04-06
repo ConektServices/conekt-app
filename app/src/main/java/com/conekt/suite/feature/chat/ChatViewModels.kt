@@ -12,20 +12,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Chat list
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Chat list ─────────────────────────────────────────────────────────────────
 
-class ChatListViewModel(
-    private val repo: ChatRepository = ChatRepository()
-) : ViewModel() {
+class ChatListViewModel(private val repo: ChatRepository = ChatRepository()) : ViewModel() {
 
-    private val _state = MutableStateFlow(ChatListUiState())
-    val state: StateFlow<ChatListUiState> = _state.asStateFlow()
+    private val _state = MutableStateFlow(ChatListState())
+    val state: StateFlow<ChatListState> = _state.asStateFlow()
 
-    init { refresh() }
+    init { load() }
 
-    fun refresh() {
+    fun load() {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             val convs   = safe { repo.fetchConversations() } ?: emptyList()
@@ -34,8 +30,8 @@ class ChatListViewModel(
         }
     }
 
-    fun onSearchQueryChange(q: String) {
-        _state.value = _state.value.copy(searchQuery = q, searchResults = emptyList())
+    fun onQueryChange(q: String) {
+        _state.value = _state.value.copy(query = q, searchResults = emptyList())
         if (q.isBlank()) return
         viewModelScope.launch {
             _state.value = _state.value.copy(isSearching = true)
@@ -44,99 +40,120 @@ class ChatListViewModel(
         }
     }
 
-    fun clearSearch() {
-        _state.value = _state.value.copy(searchQuery = "", searchResults = emptyList())
+    fun clearQuery() {
+        _state.value = _state.value.copy(query = "", searchResults = emptyList(), isSearching = false)
     }
 
-    /** Returns the conversation ID for a direct chat with userId (creating if needed). */
+    /** Open or create a DM with userId. Returns the conversation ID. */
     suspend fun openOrCreateDm(userId: String): String =
-        safe { repo.getOrCreateDirectConversation(userId) } ?: ""
+        safe { repo.getOrCreateDm(userId) } ?: ""
 
-    private suspend fun <T> safe(block: suspend () -> T): T? =
-        runCatching { block() }.getOrNull()
+    private suspend fun <T> safe(block: suspend () -> T): T? = runCatching { block() }.getOrNull()
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Chat thread
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Chat thread ───────────────────────────────────────────────────────────────
 
-class ChatThreadViewModel(
-    private val repo: ChatRepository = ChatRepository()
-) : ViewModel() {
+class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) : ViewModel() {
 
-    private val _state = MutableStateFlow(ChatThreadUiState())
-    val state: StateFlow<ChatThreadUiState> = _state.asStateFlow()
+    private val _state = MutableStateFlow(ChatThreadState())
+    val state: StateFlow<ChatThreadState> = _state.asStateFlow()
 
-    private var convId:      String = ""
-    private var otherUserId: String = ""
-    private var pollJob:     Job?   = null
+    private var convId       = ""
+    private var otherUserId  = ""
+    private var pollJob: Job? = null
+    private var initialized  = false
 
+    /** Call once with the conversation and other-user IDs. Safe to call multiple times. */
     fun init(conversationId: String, otherId: String) {
-        convId      = conversationId
-        otherUserId = otherId
+        if (initialized && convId == conversationId) return   // already set up for this conv
+        initialized  = true
+        convId       = conversationId
+        otherUserId  = otherId
+        pollJob?.cancel()
         loadMessages()
         startPolling()
     }
 
     private fun loadMessages() {
+        if (convId.isBlank()) return
         viewModelScope.launch {
-            _state.value = _state.value.copy(isLoading = true)
+            _state.value = _state.value.copy(isLoading = true, error = null)
             val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: emptyList()
             _state.value = _state.value.copy(isLoading = false, messages = msgs)
         }
     }
 
     private fun startPolling() {
-        pollJob?.cancel()
         pollJob = viewModelScope.launch {
             while (true) {
                 delay(3_000)
+                if (convId.isBlank()) continue
                 val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: continue
                 _state.value = _state.value.copy(messages = msgs)
             }
         }
     }
 
+    // ── Draft / input ─────────────────────────────────────────────────────────
+
     fun onDraftChange(text: String) {
         _state.value = _state.value.copy(draft = text)
     }
 
+    fun toggleEmoji() {
+        _state.value = _state.value.copy(showEmoji = !_state.value.showEmoji, showAttach = false)
+    }
+
+    fun toggleAttach() {
+        _state.value = _state.value.copy(showAttach = !_state.value.showAttach, showEmoji = false)
+    }
+
+    fun appendEmoji(emoji: String) {
+        _state.value = _state.value.copy(draft = _state.value.draft + emoji, showEmoji = false)
+    }
+
+    // ── Send actions ──────────────────────────────────────────────────────────
+
     fun sendText() {
         val text = _state.value.draft.trim()
         if (text.isBlank() || convId.isBlank()) return
-        _state.value = _state.value.copy(draft = "", isSending = true)
+        _state.value = _state.value.copy(draft = "", isSending = true, showEmoji = false)
         viewModelScope.launch {
             safe { repo.sendText(convId, text, otherUserId) }
-            val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: emptyList()
-            _state.value = _state.value.copy(isSending = false, messages = msgs)
+            refresh()
+            _state.value = _state.value.copy(isSending = false)
         }
     }
 
     fun sendFile(context: Context, uri: Uri) {
         if (convId.isBlank()) return
-        _state.value = _state.value.copy(isSending = true)
+        _state.value = _state.value.copy(isSending = true, showAttach = false)
         viewModelScope.launch {
             safe { repo.sendFile(context, convId, uri, otherUserId) }
-            val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: emptyList()
-            _state.value = _state.value.copy(isSending = false, messages = msgs)
+            refresh()
+            _state.value = _state.value.copy(isSending = false)
         }
     }
 
-    fun sendMusicTrack(trackId: String, title: String, artist: String, coverUrl: String?, fileUrl: String) {
+    fun sendMusic(trackId: String, title: String, artist: String, coverUrl: String?, fileUrl: String) {
         if (convId.isBlank()) return
+        _state.value = _state.value.copy(showAttach = false)
         viewModelScope.launch {
-            safe { repo.sendMusicTrack(convId, trackId, title, artist, coverUrl, fileUrl) }
-            val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: emptyList()
-            _state.value = _state.value.copy(messages = msgs)
+            safe { repo.sendMusic(convId, trackId, title, artist, coverUrl, fileUrl) }
+            refresh()
         }
     }
 
-    fun deleteMessage(messageId: String) {
+    fun deleteMessage(msgId: String) {
         viewModelScope.launch {
-            safe { repo.deleteMessage(messageId) }
-            val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: emptyList()
-            _state.value = _state.value.copy(messages = msgs)
+            safe { repo.deleteMessage(msgId) }
+            refresh()
         }
+    }
+
+    private suspend fun refresh() {
+        val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: return
+        _state.value = _state.value.copy(messages = msgs)
     }
 
     override fun onCleared() {
@@ -144,42 +161,40 @@ class ChatThreadViewModel(
         pollJob?.cancel()
     }
 
-    private suspend fun <T> safe(block: suspend () -> T): T? =
-        runCatching { block() }.getOrNull()
+    private suspend fun <T> safe(block: suspend () -> T): T? = runCatching { block() }.getOrNull()
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// User profile
-// ─────────────────────────────────────────────────────────────────────────────
+// ── User profile ──────────────────────────────────────────────────────────────
 
-class UserProfileViewModel(
-    private val repo: ChatRepository = ChatRepository()
-) : ViewModel() {
+class UserProfileViewModel(private val repo: ChatRepository = ChatRepository()) : ViewModel() {
 
-    private val _state = MutableStateFlow(UserProfileUiState())
-    val state: StateFlow<UserProfileUiState> = _state.asStateFlow()
+    private val _state = MutableStateFlow(UserProfileState())
+    val state: StateFlow<UserProfileState> = _state.asStateFlow()
 
     fun load(userId: String) {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true)
-            val p = safe { repo.fetchUserProfile(userId) }
+            val p = safe { repo.fetchProfile(userId) }
             _state.value = _state.value.copy(isLoading = false, profile = p, isFollowing = p?.isFollowing ?: false)
         }
     }
 
     fun toggleFollow(userId: String) {
         val was = _state.value.isFollowing
-        // Optimistic update
         _state.value = _state.value.copy(isFollowing = !was)
         viewModelScope.launch {
-            if (was) safe { repo.unfollowUser(userId) }
-            else     safe { repo.followUser(userId) }
+            if (was) safe { repo.unfollow(userId) } else safe { repo.follow(userId) }
         }
     }
 
-    suspend fun getOrCreateDm(userId: String): String =
-        safe { repo.getOrCreateDirectConversation(userId) } ?: ""
+    fun startDm(userId: String, onReady: (convId: String) -> Unit) {
+        _state.value = _state.value.copy(isDmLoading = true)
+        viewModelScope.launch {
+            val convId = safe { repo.getOrCreateDm(userId) } ?: ""
+            _state.value = _state.value.copy(isDmLoading = false, dmConvId = convId)
+            if (convId.isNotBlank()) onReady(convId)
+        }
+    }
 
-    private suspend fun <T> safe(block: suspend () -> T): T? =
-        runCatching { block() }.getOrNull()
+    private suspend fun <T> safe(block: suspend () -> T): T? = runCatching { block() }.getOrNull()
 }

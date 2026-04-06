@@ -32,43 +32,34 @@ fun ConektNavHost(
     musicViewModel:   MusicViewModel,
     modifier:         Modifier = Modifier
 ) {
-    NavHost(
-        navController    = navController,
-        startDestination = startDestination,
-        modifier         = modifier
-    ) {
+    NavHost(navController = navController, startDestination = startDestination, modifier = modifier) {
 
         // ── Auth ──────────────────────────────────────────────────────────────
         composable(AppRoutes.AUTH) {
             AuthScreen(
                 onSignInSuccess = {
-                    navController.navigate(Routes.PULSE) {
-                        popUpTo(AppRoutes.AUTH) { inclusive = true }
-                    }
+                    navController.navigate(Routes.PULSE) { popUpTo(AppRoutes.AUTH) { inclusive = true } }
                 },
                 onSignUpSuccess = {
-                    navController.navigate(Routes.PHONE_SETUP) {
-                        popUpTo(AppRoutes.AUTH) { inclusive = true }
-                    }
+                    navController.navigate(Routes.PHONE_SETUP) { popUpTo(AppRoutes.AUTH) { inclusive = true } }
                 }
             )
         }
 
         composable(Routes.PHONE_SETUP) {
             PhoneSetupScreen(onComplete = {
-                navController.navigate(Routes.PULSE) {
-                    popUpTo(Routes.PHONE_SETUP) { inclusive = true }
-                }
+                navController.navigate(Routes.PULSE) { popUpTo(Routes.PHONE_SETUP) { inclusive = true } }
             })
         }
 
-        // ── Pulse (Home) ──────────────────────────────────────────────────────
+        // ── Pulse (main home) ─────────────────────────────────────────────────
         composable(Routes.PULSE) {
             PulseScreen(
                 onCreatePostClick = { navController.navigate(Routes.CREATE_POST) },
                 onOpenChat        = { navController.navigate(Routes.CHAT) },
-                onOpenUserProfile = { userId ->
-                    navController.navigate(Routes.userProfile(userId))
+                onOpenUserProfile = { userId -> navController.navigate(Routes.userProfile(userId)) },
+                onOpenThread      = { convId, otherId, name, avatar ->
+                    navController.navigate(Routes.chatThread(convId, otherId, name, avatar))
                 }
             )
         }
@@ -80,15 +71,13 @@ fun ConektNavHost(
             )
         }
 
-        // ── Chat list ─────────────────────────────────────────────────────────
+        // ── Chat list (standalone — accessible from side menu too) ────────────
         composable(Routes.CHAT) {
             ChatListScreen(
                 onOpenThread  = { convId, otherId, name, avatar ->
-                    navController.navigate(Routes.chatThread(convId, otherId, name))
+                    navController.navigate(Routes.chatThread(convId, otherId, name, avatar))
                 },
-                onOpenProfile = { userId ->
-                    navController.navigate(Routes.userProfile(userId))
-                }
+                onOpenProfile = { userId -> navController.navigate(Routes.userProfile(userId)) }
             )
         }
 
@@ -98,18 +87,19 @@ fun ConektNavHost(
             arguments = listOf(
                 navArgument("convId")  { type = NavType.StringType },
                 navArgument("otherId") { type = NavType.StringType },
-                navArgument("name")    { type = NavType.StringType }
+                navArgument("name")    { type = NavType.StringType },
+                navArgument("avatar")  { type = NavType.StringType; defaultValue = "" }
             )
         ) { back ->
-            val convId  = back.arguments?.getString("convId")  ?: ""
-            val otherId = back.arguments?.getString("otherId") ?: ""
-            val rawName = back.arguments?.getString("name")    ?: ""
-            val name    = runCatching { java.net.URLDecoder.decode(rawName, "UTF-8") }.getOrDefault(rawName)
+            fun dec(key: String) = runCatching {
+                java.net.URLDecoder.decode(back.arguments?.getString(key) ?: "", "UTF-8")
+            }.getOrDefault("")
+
             ChatThreadScreen(
-                conversationId = convId,
-                otherUserId    = otherId,
-                otherName      = name,
-                otherAvatarUrl = null,
+                conversationId = dec("convId"),
+                otherUserId    = dec("otherId"),
+                otherName      = dec("name"),
+                otherAvatarUrl = dec("avatar").ifBlank { null },
                 onBack         = { navController.popBackStack() },
                 onOpenProfile  = { userId -> navController.navigate(Routes.userProfile(userId)) }
             )
@@ -125,7 +115,7 @@ fun ConektNavHost(
                 userId       = userId,
                 onBack       = { navController.popBackStack() },
                 onStartChat  = { convId, otherId, name, avatar ->
-                    navController.navigate(Routes.chatThread(convId, otherId, name))
+                    navController.navigate(Routes.chatThread(convId, otherId, name, avatar))
                 }
             )
         }

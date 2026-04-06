@@ -3,7 +3,6 @@ package com.conekt.suite.feature.library
 import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.conekt.suite.data.model.LocalTrack
 import com.conekt.suite.data.model.MusicStats
@@ -228,7 +227,12 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
                     artist   = liveEntry.artistName
                 )
             }
-            update { copy(downloadingTrackId = null, downloadToastMessage = if (result == true) "Downloaded to your library!" else "Download failed") }
+            update {
+                copy(
+                    downloadingTrackId = null,
+                    downloadToastMessage = if (result == true) "Downloaded to your library!" else "Download failed"
+                )
+            }
         }
     }
 
@@ -354,10 +358,5 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         if (track?.id != null && track.source == MusicSource.ONLINE) {
             viewModelScope.launch { repo.leaveListener(track.id) }
         }
-    }
-
-    // ── Factory — required for AndroidViewModel with by viewModels() ──────────
-    companion object {
-        val Factory: ViewModelProvider.Factory = ViewModelProvider.AndroidViewModelFactory()
     }
 }

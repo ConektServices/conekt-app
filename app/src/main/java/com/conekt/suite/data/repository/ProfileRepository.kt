@@ -1,10 +1,10 @@
 package com.conekt.suite.data.repository
 
+import com.conekt.suite.core.supabase.SupabaseProvider   // ← single provider
 import com.conekt.suite.data.model.FileRecord
 import com.conekt.suite.data.model.NoteRecord
 import com.conekt.suite.data.model.PostRecord
 import com.conekt.suite.data.model.ProfileRecord
-import com.conekt.suite.data.remote.SupabaseProvider
 import io.github.jan.supabase.postgrest.from
 import io.github.jan.supabase.postgrest.query.Order
 
