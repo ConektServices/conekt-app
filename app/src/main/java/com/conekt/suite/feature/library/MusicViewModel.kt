@@ -42,14 +42,14 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun loadSettings() {
         viewModelScope.launch {
-            val s = settingsRepo.load()
-            update { copy(settings = s) }
+            val s = safeGet { settingsRepo.load() }
+            if (s != null) update { copy(settings = s) }
         }
     }
 
     fun onSettingsChange(settings: MusicSettings) {
         update { copy(settings = settings) }
-        viewModelScope.launch { settingsRepo.save(settings) }
+        viewModelScope.launch { safeGet { settingsRepo.save(settings) } }
     }
 
     // ── Init / load ───────────────────────────────────────────────────────────
@@ -57,6 +57,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     private fun loadOnlineTracks() {
         viewModelScope.launch {
             update { copy(isLoadingOnline = true) }
+            // Each fetch is independently safe — one failure won't block the other
             val tracks  = safeList { repo.fetchPublicTracks() }
             val uploads = safeList { repo.fetchMyUploads() }
             update { copy(isLoadingOnline = false, onlineTracks = tracks, myUploads = uploads) }
@@ -84,20 +85,96 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ── Observe player — handles auto-next on track completion ────────────────
+
     private fun observePlayerState() {
         viewModelScope.launch {
             ConektPlayer.state.collect { ps ->
                 update { copy(isPlaying = ps.isPlaying) }
+
+                // Track ended naturally — advance queue
+                if (ps.trackEnded) {
+                    ConektPlayer.clearTrackEnded()
+                    handleTrackEnd()
+                }
             }
         }
     }
 
-    // ── Live listeners poll ───────────────────────────────────────────────────
+    /**
+     * Called when ExoPlayer fires STATE_ENDED.
+     * Honours repeat-one, repeat-all, shuffle, and autoplay setting.
+     */
+    private fun handleTrackEnd() {
+        val state    = _uiState.value
+        val track    = state.activeTrack ?: return
+        val queue    = buildQueue()
+        if (queue.isEmpty()) return
+
+        // Record completed play
+        if (track.id != null && track.source == MusicSource.ONLINE) {
+            val durationS = ((System.currentTimeMillis() - playStartMs) / 1000).toInt()
+            viewModelScope.launch { safeGet { repo.recordPlay(track.id, durationS, true, "stream") } }
+        }
+
+        when (state.repeatMode) {
+            RepeatMode.ONE -> {
+                // Replay the same track
+                ConektPlayer.play(track.uri, track.title, track.artist)
+                update { copy(isPlaying = true, progressFraction = 0f) }
+                startProgressTracking()
+                playStartMs = System.currentTimeMillis()
+            }
+            RepeatMode.ALL -> {
+                val next = nextTrack(queue, track, shuffle = state.isShuffle, wrap = true)
+                if (next != null) playActiveTrack(next)
+            }
+            RepeatMode.NONE -> {
+                if (!state.settings.autoplay) return
+                val next = nextTrack(queue, track, shuffle = state.isShuffle, wrap = false)
+                if (next != null) playActiveTrack(next)
+            }
+        }
+    }
+
+    /** Pure function — picks the next track given current queue, position, shuffle and wrap. */
+    private fun nextTrack(
+        queue:   List<ActiveTrack>,
+        current: ActiveTrack,
+        shuffle: Boolean,
+        wrap:    Boolean
+    ): ActiveTrack? {
+        if (queue.size <= 1) return if (wrap) queue.firstOrNull() else null
+        if (shuffle) {
+            // Pick any track except the current one
+            val others = queue.filter { it.uri != current.uri }
+            return others.randomOrNull()
+        }
+        val idx = queue.indexOfFirst { it.uri == current.uri }
+        return when {
+            idx < 0              -> queue.firstOrNull()
+            idx + 1 < queue.size -> queue[idx + 1]
+            wrap                 -> queue.firstOrNull()
+            else                 -> null
+        }
+    }
+
+    private fun prevTrack(queue: List<ActiveTrack>, current: ActiveTrack): ActiveTrack? {
+        if (queue.isEmpty()) return null
+        val idx = queue.indexOfFirst { it.uri == current.uri }
+        return when {
+            idx <= 0 -> queue.lastOrNull()
+            else     -> queue[idx - 1]
+        }
+    }
+
+    // ── Live listeners poll — isolated so crashes don't affect other loading ──
 
     private fun startLiveListenersPoll() {
         livePresenceJob?.cancel()
         livePresenceJob = viewModelScope.launch {
             while (true) {
+                // Wrapped independently so a failure just skips this cycle
                 val listeners = safeList { repo.fetchLiveListeners() }
                 update { copy(liveListeners = listeners) }
                 delay(15_000)
@@ -118,12 +195,8 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
             durationMs = track.duration,
             source     = MusicSource.LOCAL
         )
-        ConektPlayer.play(track.uri, track.title, track.artist)
-        update { copy(activeTrack = active, isPlaying = true, progressFraction = 0f) }
-        startProgressTracking()
-        playStartMs = System.currentTimeMillis()
-        val settings = _uiState.value.settings
-        if (settings.shareLocalActivity) {
+        playActiveTrack(active)
+        if (_uiState.value.settings.shareLocalActivity) {
             viewModelScope.launch { safeGet { repo.broadcastLocalPlay(track.title, track.artist) } }
         }
     }
@@ -139,11 +212,15 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
             durationMs = track.durationMs.toLong(),
             source     = MusicSource.ONLINE
         )
-        ConektPlayer.play(track.fileUrl, track.title, track.artist)
+        playActiveTrack(active)
+        viewModelScope.launch { safeGet { repo.joinListener(track.id) } }
+    }
+
+    private fun playActiveTrack(active: ActiveTrack) {
+        ConektPlayer.play(active.uri, active.title, active.artist)
         update { copy(activeTrack = active, isPlaying = true, progressFraction = 0f) }
         startProgressTracking()
         playStartMs = System.currentTimeMillis()
-        viewModelScope.launch { repo.joinListener(track.id) }
     }
 
     fun togglePlayPause() {
@@ -160,28 +237,36 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
 
     fun skipNext(queue: List<ActiveTrack>) {
         val current = _uiState.value.activeTrack ?: return
-        val idx = queue.indexOfFirst { it.uri == current.uri }
-        if (idx >= 0 && idx + 1 < queue.size) {
-            val next = queue[idx + 1]
-            if (next.source == MusicSource.LOCAL) {
-                playLocal(LocalTrack(0, next.title, next.artist, next.album, next.durationMs, next.uri, next.coverUri))
-            } else {
-                _uiState.value.onlineTracks.find { it.id == next.id }?.let { playOnline(it) }
-            }
-        }
+        val state   = _uiState.value
+        val next    = nextTrack(queue, current, shuffle = state.isShuffle, wrap = true) ?: return
+        playActiveTrack(next)
     }
 
     fun skipPrevious(queue: List<ActiveTrack>) {
         val current = _uiState.value.activeTrack ?: return
-        val idx = queue.indexOfFirst { it.uri == current.uri }
-        if (idx > 0) {
-            val prev = queue[idx - 1]
-            if (prev.source == MusicSource.LOCAL) {
-                playLocal(LocalTrack(0, prev.title, prev.artist, prev.album, prev.durationMs, prev.uri, prev.coverUri))
-            } else {
-                _uiState.value.onlineTracks.find { it.id == prev.id }?.let { playOnline(it) }
-            }
+        // If we're more than 3 seconds in, restart the current track instead
+        if (ConektPlayer.currentPositionMs() > 3_000L) {
+            ConektPlayer.seekTo(0f)
+            update { copy(progressFraction = 0f, positionMs = 0L) }
+            return
         }
+        val prev = prevTrack(queue, current) ?: return
+        playActiveTrack(prev)
+    }
+
+    // ── Shuffle / Repeat toggles ──────────────────────────────────────────────
+
+    fun toggleShuffle() {
+        update { copy(isShuffle = !isShuffle) }
+    }
+
+    fun cycleRepeatMode() {
+        val next = when (_uiState.value.repeatMode) {
+            RepeatMode.NONE -> RepeatMode.ALL
+            RepeatMode.ALL  -> RepeatMode.ONE
+            RepeatMode.ONE  -> RepeatMode.NONE
+        }
+        update { copy(repeatMode = next) }
     }
 
     fun buildQueue(): List<ActiveTrack> {
@@ -210,7 +295,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         val track = _uiState.value.activeTrack ?: return
         if (track.id == null || track.source != MusicSource.ONLINE) return
         val durationS = ((System.currentTimeMillis() - playStartMs) / 1000).toInt()
-        viewModelScope.launch { repo.recordPlay(track.id, durationS, completed, "stream") }
+        viewModelScope.launch { safeGet { repo.recordPlay(track.id, durationS, completed, "stream") } }
     }
 
     // ── Download ──────────────────────────────────────────────────────────────
@@ -229,7 +314,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
             }
             update {
                 copy(
-                    downloadingTrackId = null,
+                    downloadingTrackId   = null,
                     downloadToastMessage = if (result == true) "Downloaded to your library!" else "Download failed"
                 )
             }
@@ -347,8 +432,11 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         _uiState.value = _uiState.value.copy(shareSheet = _uiState.value.shareSheet.block())
     }
 
-    private suspend fun <T> safeGet(block: suspend () -> T): T? = try { block() } catch (_: Exception) { null }
-    private suspend fun <T> safeList(block: suspend () -> List<T>): List<T> = try { block() } catch (_: Exception) { emptyList() }
+    private suspend fun <T> safeGet(block: suspend () -> T): T? =
+        try { block() } catch (_: Exception) { null }
+
+    private suspend fun <T> safeList(block: suspend () -> List<T>): List<T> =
+        try { block() } catch (_: Exception) { emptyList() }
 
     override fun onCleared() {
         super.onCleared()
@@ -356,7 +444,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         livePresenceJob?.cancel()
         val track = _uiState.value.activeTrack
         if (track?.id != null && track.source == MusicSource.ONLINE) {
-            viewModelScope.launch { repo.leaveListener(track.id) }
+            viewModelScope.launch { safeGet { repo.leaveListener(track.id) } }
         }
     }
 }

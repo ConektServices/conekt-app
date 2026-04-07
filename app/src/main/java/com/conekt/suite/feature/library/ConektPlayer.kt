@@ -10,53 +10,47 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-/**
- * App-scoped singleton music player.
- *
- * Two modes:
- *  1. Standalone (used before the service starts): creates its own ExoPlayer.
- *  2. Service-backed (preferred): MusicPlaybackService creates the ExoPlayer and
- *     calls [attachServicePlayer]; this instance then becomes a thin wrapper.
- *
- * The ViewModel always talks to THIS singleton, never directly to ExoPlayer.
- */
+enum class RepeatMode { NONE, ONE, ALL }
+
 object ConektPlayer {
 
     data class State(
-        val isPlaying:    Boolean = false,
-        val durationMs:   Long    = 0L,
-        val positionMs:   Long    = 0L,
-        val currentUri:   String? = null,
-        val trackTitle:   String  = "",
-        val trackArtist:  String  = ""
+        val isPlaying:    Boolean    = false,
+        val durationMs:   Long       = 0L,
+        val positionMs:   Long       = 0L,
+        val currentUri:   String?    = null,
+        val trackTitle:   String     = "",
+        val trackArtist:  String     = "",
+        val trackEnded:   Boolean    = false   // pulses true when a track finishes naturally
     )
 
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
 
-    // The actual player – may be owned by us or by the service.
+    // Called by MusicViewModel when it has consumed the trackEnded signal
+    fun clearTrackEnded() {
+        if (_state.value.trackEnded) _state.value = _state.value.copy(trackEnded = false)
+    }
+
+    // ── Player ref ────────────────────────────────────────────────────────────
+
     private var player: ExoPlayer? = null
     private var ownedByService = false
 
     // ── Service integration ───────────────────────────────────────────────────
 
-    /** Called by MusicPlaybackService.onCreate() */
     fun attachServicePlayer(servicePlayer: ExoPlayer) {
-        // Release our own player if we had one
-        if (!ownedByService) {
-            player?.release()
-        }
+        if (!ownedByService) player?.release()
         player = servicePlayer
         ownedByService = true
+        attachListener(servicePlayer)
     }
 
-    /** Called by MusicPlaybackService.onDestroy() */
     fun detachServicePlayer() {
         player = null
         ownedByService = false
     }
 
-    /** Called by the service listener to keep state in sync */
     fun syncFromService(isPlaying: Boolean, positionMs: Long, durationMs: Long) {
         _state.value = _state.value.copy(
             isPlaying  = isPlaying,
@@ -69,29 +63,50 @@ object ConektPlayer {
         _state.value = _state.value.copy(durationMs = durationMs.coerceAtLeast(0L))
     }
 
-    // ── Fallback init (standalone, no service) ────────────────────────────────
+    // ── Standalone init ───────────────────────────────────────────────────────
 
     fun init(context: Context) {
         if (player != null) return
-        player = ExoPlayer.Builder(context.applicationContext).build().also { p ->
-            p.addListener(object : Player.Listener {
-                override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    _state.value = _state.value.copy(isPlaying = isPlaying)
-                }
-                override fun onPlaybackStateChanged(state: Int) {
-                    if (state == Player.STATE_READY) {
-                        _state.value = _state.value.copy(durationMs = p.duration.coerceAtLeast(0L))
-                    }
-                }
-            })
-        }
+        val exo = ExoPlayer.Builder(context.applicationContext).build()
+        attachListener(exo)
+        player = exo
         ownedByService = false
+    }
+
+    // ── Shared listener (standalone + service) ────────────────────────────────
+
+    private fun attachListener(exo: ExoPlayer) {
+        exo.addListener(object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                _state.value = _state.value.copy(isPlaying = isPlaying)
+            }
+
+            override fun onPlaybackStateChanged(state: Int) {
+                when (state) {
+                    Player.STATE_READY -> {
+                        _state.value = _state.value.copy(
+                            durationMs = exo.duration.coerceAtLeast(0L)
+                        )
+                    }
+                    Player.STATE_ENDED -> {
+                        // Signal the ViewModel to advance the queue
+                        _state.value = _state.value.copy(
+                            isPlaying  = false,
+                            trackEnded = true
+                        )
+                    }
+                    else -> Unit
+                }
+            }
+        })
     }
 
     // ── Playback controls ─────────────────────────────────────────────────────
 
     fun play(uri: String, title: String = "", artist: String = "") {
         val p = player ?: return
+        // Clear any previous ended signal before starting new track
+        _state.value = _state.value.copy(trackEnded = false)
         val mediaItem = MediaItem.Builder()
             .setUri(Uri.parse(uri))
             .setMediaMetadata(
@@ -108,14 +123,11 @@ object ConektPlayer {
             currentUri  = uri,
             trackTitle  = title,
             trackArtist = artist,
-            isPlaying   = true
+            isPlaying   = true,
+            trackEnded  = false
         )
     }
 
-    /**
-     * Reliable toggle: reads the PLAYER'S actual state, not our cached state,
-     * to avoid the "button shows wrong icon" bug.
-     */
     fun togglePlayPause() {
         val p = player ?: return
         if (p.isPlaying) {
@@ -127,7 +139,6 @@ object ConektPlayer {
         }
     }
 
-    /** Returns the TRUE playing state from the player, not the cached value. */
     val isActuallyPlaying: Boolean get() = player?.isPlaying == true
 
     fun seekTo(fraction: Float) {
@@ -143,14 +154,6 @@ object ConektPlayer {
         _state.value = _state.value.copy(positionMs = ms)
     }
 
-    fun skipToNext(queue: List<String>) {
-        val cur = _state.value.currentUri ?: return
-        val idx = queue.indexOf(cur)
-        if (idx >= 0 && idx + 1 < queue.size) {
-            // caller handles the actual play() call with metadata
-        }
-    }
-
     fun currentPositionFraction(): Float {
         val p   = player ?: return 0f
         val dur = p.duration
@@ -160,14 +163,11 @@ object ConektPlayer {
     fun currentPositionMs(): Long = player?.currentPosition ?: 0L
 
     fun release() {
-        if (!ownedByService) {
-            player?.release()
-        }
+        if (!ownedByService) player?.release()
         player = null
     }
 
-    // ── Queue support ─────────────────────────────────────────────────────────
-
+    // Legacy queue helpers kept for compatibility
     fun next(items: List<Pair<String, String>>, currentUri: String) {
         val idx = items.indexOfFirst { it.first == currentUri }
         if (idx >= 0 && idx + 1 < items.size) {

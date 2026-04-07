@@ -200,26 +200,88 @@ class ChatRepository(
     /** Returns existing conversation ID or creates a new one. */
     suspend fun getOrCreateDm(otherUserId: String): String {
         val uid = me()
-        // Shared conversations
-        val mine   = db.from("conversation_members")
-            .select(Columns.raw("conversation_id")) { filter { eq("user_id", uid) } }
-            .decodeList<MemberConvIdRow>().map { it.conversationId }.toSet()
-        val theirs = db.from("conversation_members")
-            .select(Columns.raw("conversation_id")) { filter { eq("user_id", otherUserId) } }
-            .decodeList<MemberConvIdRow>().map { it.conversationId }.toSet()
 
+        // --- Step 1: find conversations I'm in ---
+        val mine = try {
+            db.from("conversation_members")
+                .select(Columns.raw("conversation_id")) {
+                    filter { eq("user_id", uid) }
+                }
+                .decodeList<MemberConvIdRow>()
+                .map { it.conversationId }
+                .toSet()
+        } catch (e: Exception) {
+            android.util.Log.e("ChatRepo", "Failed to fetch my conversations: ${e.message}")
+            emptySet()
+        }
+
+        // --- Step 2: find conversations the other user is in ---
+        val theirs = try {
+            db.from("conversation_members")
+                .select(Columns.raw("conversation_id")) {
+                    filter { eq("user_id", otherUserId) }
+                }
+                .decodeList<MemberConvIdRow>()
+                .map { it.conversationId }
+                .toSet()
+        } catch (e: Exception) {
+            android.util.Log.e("ChatRepo", "Failed to fetch their conversations: ${e.message}")
+            emptySet()
+        }
+
+        // --- Step 3: return shared conversation if it exists ---
         val shared = mine.intersect(theirs)
-        if (shared.isNotEmpty()) return shared.first()
+        if (shared.isNotEmpty()) {
+            android.util.Log.d("ChatRepo", "Found existing DM: ${shared.first()}")
+            return shared.first()
+        }
 
-        // Create
-        val conv = db.from("conversations")
-            .insert(ConvInsertRow("direct", uid)) { select() }
-            .decodeSingle<ConvRow>()
-        db.from("conversation_members").insert(listOf(
-            MemberInsertRow(conv.id, uid),
-            MemberInsertRow(conv.id, otherUserId)
-        ))
-        return conv.id
+        // --- Step 4: create new conversation ---
+        android.util.Log.d("ChatRepo", "Creating new DM between $uid and $otherUserId")
+
+        val convId = try {
+            // Insert the conversation and get back the id
+            val result = db.from("conversations")
+                .insert(ConvInsertRow("direct", uid)) {
+                    select()
+                }
+                .decodeList<ConvRow>()
+
+            android.util.Log.d("ChatRepo", "Insert result count: ${result.size}")
+            result.firstOrNull()?.id?.also {
+                android.util.Log.d("ChatRepo", "New conversation id: $it")
+            } ?: run {
+                android.util.Log.e("ChatRepo", "Insert returned empty result")
+                // Fallback: try to fetch the just-created conversation
+                db.from("conversations")
+                    .select {
+                        filter { eq("created_by", uid) }
+                        order("created_at", io.github.jan.supabase.postgrest.query.Order.DESCENDING)
+                        limit(1)
+                    }
+                    .decodeList<ConvRow>()
+                    .firstOrNull()?.id ?: error("Could not create or find conversation")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("ChatRepo", "Failed to create conversation: ${e::class.simpleName}: ${e.message}")
+            throw e
+        }
+
+        // --- Step 5: add both members ---
+        try {
+            db.from("conversation_members").insert(
+                listOf(
+                    MemberInsertRow(convId, uid),
+                    MemberInsertRow(convId, otherUserId)
+                )
+            )
+            android.util.Log.d("ChatRepo", "Members added to $convId")
+        } catch (e: Exception) {
+            android.util.Log.e("ChatRepo", "Failed to add members: ${e.message}")
+            throw e
+        }
+
+        return convId
     }
 
     // ── Messages ──────────────────────────────────────────────────────────────

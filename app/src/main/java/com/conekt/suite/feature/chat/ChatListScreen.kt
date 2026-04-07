@@ -92,16 +92,20 @@ fun ChatListScreen(
                     isSearching = state.isSearching,
                     onOpenProfile = onOpenProfile,
                     onStartChat = { user ->
-                        // Launch coroutine to create/get conversation then navigate
                         scope.launch {
+                            android.util.Log.d("ChatDebug", "Message button tapped for ${user.id} (${user.displayName ?: user.username})")
                             val convId = vm.openOrCreateDm(user.id)
+                            android.util.Log.d("ChatDebug", "convId result: '$convId'")
                             if (convId.isNotBlank()) {
+                                android.util.Log.d("ChatDebug", "Navigating to thread...")
                                 onOpenThread(
                                     convId,
                                     user.id,
                                     user.displayName ?: user.username,
                                     user.avatarUrl ?: ""
                                 )
+                            } else {
+                                android.util.Log.e("ChatDebug", "convId was blank, NOT navigating")
                             }
                         }
                     }

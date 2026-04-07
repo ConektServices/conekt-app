@@ -46,8 +46,18 @@ class ChatListViewModel(private val repo: ChatRepository = ChatRepository()) : V
     }
 
     /** Creates or opens a DM conversation. Returns the conversation ID, or "" on failure. */
-    suspend fun openOrCreateDm(userId: String): String =
-        safe { repo.getOrCreateDm(userId) } ?: ""
+    suspend fun openOrCreateDm(userId: String): String {
+        return try {
+            val id = repo.getOrCreateDm(userId)
+            android.util.Log.d("ChatDebug", "openOrCreateDm success: '$id'")
+            id
+        } catch (e: Exception) {
+            android.util.Log.e("ChatDebug", "openOrCreateDm FAILED: ${e::class.simpleName}: ${e.message}")
+            // Surface the error in the UI state so we can see it
+            _state.value = _state.value.copy(error = "Chat error: ${e.message}")
+            ""
+        }
+    }
 
     private suspend fun <T> safe(block: suspend () -> T): T? = runCatching { block() }.getOrNull()
 }

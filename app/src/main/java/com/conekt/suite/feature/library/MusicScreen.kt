@@ -320,7 +320,7 @@ private fun LazyListScope.homeTabItems(state: MusicUiState, viewModel: MusicView
             SectionHeader("Live now")
             Spacer(Modifier.height(12.dp))
             LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(state.liveListeners.take(8), key = { "live_${it.userId}" }) { entry ->
+                items(state.liveListeners.take(8), key = { "live_${it.userId}_${it.trackId}" }) { entry ->
                     LiveBubble(entry)
                 }
             }
@@ -756,7 +756,10 @@ private fun LiveBubble(entry: LiveListenerEntry) {
     val infiniteTransition = rememberInfiniteTransition(label = "livePulse")
     val scale by infiniteTransition.animateFloat(
         initialValue = 1f, targetValue = 1.08f,
-        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        animationSpec = infiniteRepeatable(
+            animation = tween(900),
+            repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+        ),
         label = "pulse"
     )
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(72.dp)) {
@@ -1168,7 +1171,11 @@ private fun NowPlayingFullScreen(
                         verticalAlignment     = Alignment.CenterVertically
                     ) {
                         IconButton(onClick = { viewModel.skipPrevious(queue) }) {
-                            Icon(Icons.Rounded.FastRewind, "Previous", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
+                            Icon(
+                                Icons.Rounded.FastRewind, "Previous",
+                                tint     = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(28.dp)
+                            )
                         }
                         Spacer(Modifier.width(16.dp))
                         Box(
@@ -1188,20 +1195,101 @@ private fun NowPlayingFullScreen(
                         }
                         Spacer(Modifier.width(16.dp))
                         IconButton(onClick = { viewModel.skipNext(queue) }) {
-                            Icon(Icons.Rounded.FastForward, "Next", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
+                            Icon(
+                                Icons.Rounded.FastForward, "Next",
+                                tint     = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(28.dp)
+                            )
                         }
                     }
+
                     Spacer(Modifier.height(16.dp))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                        for (icon in listOf(Icons.Rounded.Shuffle, Icons.AutoMirrored.Rounded.QueueMusic, Icons.Rounded.GraphicEq, Icons.Rounded.Repeat)) {
-                            Surface(
-                                Modifier.size(44.dp), CircleShape,
+
+                    // Shuffle / Queue / Equalizer / Repeat  ← now all wired up
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment     = Alignment.CenterVertically
+                    ) {
+                        // ── Shuffle ──────────────────────────────────────────
+                        val shuffleAccent = if (state.isShuffle) BrandEnd
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                        Surface(
+                            Modifier
+                                .size(44.dp)
+                                .clickable { viewModel.toggleShuffle() },
+                            CircleShape,
+                            color = if (state.isShuffle)
+                                BrandEnd.copy(alpha = 0.18f)
+                            else
                                 MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.08f))
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
+                            border = BorderStroke(
+                                1.dp,
+                                if (state.isShuffle) BrandEnd.copy(alpha = 0.40f)
+                                else MaterialTheme.colorScheme.outline.copy(alpha = 0.08f)
+                            )
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Rounded.Shuffle, "Shuffle", tint = shuffleAccent)
+                            }
+                        }
+
+                        // ── Queue ────────────────────────────────────────────
+                        Surface(
+                            Modifier.size(44.dp),
+                            CircleShape,
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.08f))
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    Icons.AutoMirrored.Rounded.QueueMusic, "Queue",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        // ── Equalizer (visual only) ──────────────────────────
+                        Surface(
+                            Modifier.size(44.dp),
+                            CircleShape,
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.08f))
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    Icons.Rounded.GraphicEq, "Equalizer",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        // ── Repeat ───────────────────────────────────────────
+                        val repeatIcon = when (state.repeatMode) {
+                            RepeatMode.ONE  -> Icons.Rounded.RepeatOne
+                            RepeatMode.ALL  -> Icons.Rounded.Repeat
+                            RepeatMode.NONE -> Icons.Rounded.Repeat
+                        }
+                        val repeatActive = state.repeatMode != RepeatMode.NONE
+                        val repeatAccent = if (repeatActive) BrandEnd
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                        Surface(
+                            Modifier
+                                .size(44.dp)
+                                .clickable { viewModel.cycleRepeatMode() },
+                            CircleShape,
+                            color = if (repeatActive)
+                                BrandEnd.copy(alpha = 0.18f)
+                            else
+                                MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+                            border = BorderStroke(
+                                1.dp,
+                                if (repeatActive) BrandEnd.copy(alpha = 0.40f)
+                                else MaterialTheme.colorScheme.outline.copy(alpha = 0.08f)
+                            )
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(repeatIcon, "Repeat", tint = repeatAccent)
                             }
                         }
                     }
@@ -1368,7 +1456,10 @@ private fun PulsingWaveIndicator() {
             val height by infiniteTransition.animateFloat(
                 initialValue  = 4f,
                 targetValue   = 14f,
-                animationSpec = infiniteRepeatable(tween(300 + i * 80), RepeatMode.Reverse),
+                animationSpec = infiniteRepeatable(
+                    animation = tween(300 + i * 80),
+                    repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+                ),
                 label         = "bar$i"
             )
             Box(Modifier.width(3.dp).height(height.dp).clip(RoundedCornerShape(2.dp)).background(Color.White))

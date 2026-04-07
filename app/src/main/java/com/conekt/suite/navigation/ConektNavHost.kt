@@ -91,13 +91,12 @@ fun ConektNavHost(
         composable(Routes.CHAT) {
             ChatListScreen(
                 onOpenThread = { convId, otherId, name, avatar ->
-                    // Navigate to ChatThreadScreen with proper URL-encoded args
+                    android.util.Log.d("ChatDebug", "onOpenThread called: convId=$convId otherId=$otherId name=$name")
                     navController.navigate(Routes.chatThread(convId, otherId, name, avatar))
                 },
                 onOpenProfile = { userId ->
                     navController.navigate(Routes.userProfile(userId))
                 }
-                // contentTopPadding defaults to 0.dp — standalone shows its own header
             )
         }
 

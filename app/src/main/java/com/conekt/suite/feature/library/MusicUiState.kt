@@ -51,27 +51,19 @@ data class LiveListenerEntry(
     val trackTitle:   String,
     val artistName:   String,
     val trackCoverUrl: String?,
-    val trackFileUrl: String,   // needed for download
-    val isLocal:      Boolean   = false  // true = they shared a local play
+    val trackFileUrl: String,
+    val isLocal:      Boolean = false
 )
 
 /** Music privacy / feature settings */
 data class MusicSettings(
-    /** Broadcast your listening activity to friends in the Stream tab */
     val shareListeningActivity: Boolean  = true,
-    /** Allow local music plays to be shared (if true, others can see + download) */
     val shareLocalActivity: Boolean      = false,
-    /** Allow others to download tracks you uploaded */
     val allowDownloads: Boolean          = true,
-    /** Autoplay next track in queue */
     val autoplay: Boolean                = true,
-    /** High quality streaming (uses more data) */
     val highQualityStream: Boolean       = false,
-    /** Cross-fade between tracks in seconds (0 = off) */
     val crossfadeSeconds: Int            = 0,
-    /** Show equalizer visualization */
     val showEqualizer: Boolean           = true,
-    /** Receive notifications when followed users go live */
     val liveNotifications: Boolean       = true
 )
 
@@ -96,6 +88,10 @@ data class MusicUiState(
     val isPlaying:        Boolean       = false,
     val progressFraction: Float         = 0f,
     val positionMs:       Long          = 0L,
+
+    // Playback modes
+    val isShuffle:        Boolean       = false,
+    val repeatMode:       RepeatMode    = RepeatMode.NONE,
 
     // Stats
     val stats:            MusicStats    = MusicStats(),
