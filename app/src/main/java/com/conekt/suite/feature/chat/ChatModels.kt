@@ -12,7 +12,15 @@ data class ConversationItem(
     val lastMessageAt: String?,
     val unreadCount:   Int     = 0,
     val isOnline:      Boolean = false,
-    val otherUserId:   String  = ""
+    val otherUserId:   String  = "",
+    val isBlocked:     Boolean = false
+)
+
+data class ReplyPreview(
+    val messageId: String,
+    val senderName: String,
+    val preview: String,   // text or "📷 Photo" etc
+    val isMe: Boolean
 )
 
 data class MessageItem(
@@ -24,11 +32,13 @@ data class MessageItem(
     val fileName:    String?,
     val isMe:        Boolean,
     val createdAt:   String,
-    val isDeleted:   Boolean = false,
-    val musicTitle:  String? = null,
-    val musicArtist: String? = null,
-    val musicCover:  String? = null,
-    val musicFile:   String? = null
+    val isDeleted:   Boolean    = false,
+    val musicTitle:  String?    = null,
+    val musicArtist: String?    = null,
+    val musicCover:  String?    = null,
+    val musicFile:   String?    = null,
+    val replyTo:     ReplyPreview? = null,
+    val reactions:   Map<String, Int> = emptyMap()  // emoji -> count
 )
 
 enum class MsgType { TEXT, IMAGE, FILE, AUDIO, MUSIC, EMOJI }
@@ -75,20 +85,28 @@ data class ChatListState(
 )
 
 data class ChatThreadState(
-    val isLoading: Boolean           = true,
-    val messages:  List<MessageItem> = emptyList(),
-    val draft:     String            = "",
-    val isSending: Boolean           = false,
-    val showEmoji: Boolean           = false,
-    val showAttach: Boolean          = false,
-    val error:     String?           = null
+    val isLoading:      Boolean           = true,
+    val messages:       List<MessageItem> = emptyList(),
+    val draft:          String            = "",
+    val isSending:      Boolean           = false,
+    val showEmoji:      Boolean           = false,
+    val showAttach:     Boolean           = false,
+    val showPhotoPicker: Boolean          = false,
+    val error:          String?           = null,
+    // Long-press context menu
+    val contextMessage: MessageItem?      = null,
+    // Reply
+    val replyingTo:     ReplyPreview?     = null,
+    // Image viewer
+    val viewerImages:   List<String>      = emptyList(),
+    val viewerIndex:    Int               = 0,
+    val showImageViewer: Boolean          = false
 )
 
-// UserProfileState now includes the person's public posts so we can display them
 data class UserProfileState(
     val isLoading:    Boolean           = true,
     val profile:      OtherUserProfile? = null,
-    val posts:        List<PostRecord>  = emptyList(),  // ← their public posts
+    val posts:        List<PostRecord>  = emptyList(),
     val isFollowing:  Boolean           = false,
     val isDmLoading:  Boolean           = false,
     val dmConvId:     String            = "",

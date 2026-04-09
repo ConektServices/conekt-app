@@ -1,6 +1,7 @@
 package com.conekt.suite.feature.chat
 
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.shape.*
@@ -12,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.*
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -146,14 +148,12 @@ fun ChatListScreen(
                             EmptyConversationState()
                         }
                         else -> items(state.conversations, key = { it.id }) { conv ->
-                            // Each conversation row — tap to open chat thread
-                            ConversationRow(
-                                conv = conv,
-                                onClick = {
-                                    onOpenThread(conv.id, conv.otherUserId, conv.name, conv.avatarUrl ?: "")
-                                }
-                            )
-                        }
+ConversationRow(
+            conv     = conv,
+            onClick  = { onOpenThread(conv.id, conv.otherUserId, conv.name, conv.avatarUrl ?: "") },
+            onDelete = { vm.deleteConversation(conv.id) }
+        )
+    }
                     }
                 }
             }
@@ -210,21 +210,37 @@ private fun StoriesStrip(stories: List<StoryThumb>) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun ConversationRow(conv: ConversationItem, onClick: () -> Unit) {
-    Column {
+private fun ConversationRow(conv: ConversationItem, onClick: () -> Unit, onDelete: () -> Unit) {
+    var showDeleteDialog by remember { mutableStateOf(false) }
+    val hasUnread = conv.unreadCount > 0
+
+    Column(
+        modifier = Modifier.pointerInput(Unit) {
+            detectTapGestures(
+                onTap       = { onClick() },
+                onLongPress = { showDeleteDialog = true }
+            )
+        }
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onClick)
+                // Subtle highlight for unread conversations
+                .background(if (hasUnread) BrandEnd.copy(alpha = 0.06f) else Color.Transparent)
                 .padding(horizontal = 20.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Avatar with online indicator
             Box(contentAlignment = Alignment.BottomEnd) {
                 Box(Modifier.size(52.dp).clip(CircleShape).background(BrandEnd.copy(alpha = 0.16f))) {
                     conv.avatarUrl?.ifBlank { null }?.let {
                         AsyncImage(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                     } ?: Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(conv.name.firstOrNull()?.uppercaseChar()?.toString() ?: "?", color = BrandEnd, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            conv.name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+                            color = BrandEnd, fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium
+                        )
                     }
                 }
                 if (conv.isOnline) {
@@ -235,13 +251,20 @@ private fun ConversationRow(conv: ConversationItem, onClick: () -> Unit) {
             Spacer(Modifier.width(13.dp))
 
             Column(Modifier.weight(1f)) {
-                Text(conv.name, fontWeight = FontWeight.SemiBold, color = Color.White, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    conv.name,
+                    fontWeight = if (hasUnread) FontWeight.Bold else FontWeight.SemiBold,
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
                 Text(
                     conv.lastMessage ?: "Start a conversation",
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (conv.unreadCount > 0) Color.White.copy(0.80f) else Color.White.copy(0.38f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    // Unread messages appear brighter
+                    color = if (hasUnread) Color.White.copy(0.85f) else Color.White.copy(0.38f),
+                    fontWeight = if (hasUnread) FontWeight.Medium else FontWeight.Normal,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 2.dp)
                 )
             }
@@ -250,16 +273,40 @@ private fun ConversationRow(conv: ConversationItem, onClick: () -> Unit) {
 
             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 conv.lastMessageAt?.let {
-                    Text(fmtConvTime(it), style = MaterialTheme.typography.labelSmall, color = Color.White.copy(0.28f))
+                    Text(fmtConvTime(it), style = MaterialTheme.typography.labelSmall, color = if (hasUnread) BrandEnd else Color.White.copy(0.28f))
                 }
-                if (conv.unreadCount > 0) {
-                    Box(Modifier.defaultMinSize(minWidth = 20.dp).clip(CircleShape).background(BrandEnd), contentAlignment = Alignment.Center) {
-                        Text("${conv.unreadCount}", style = MaterialTheme.typography.labelSmall, color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp))
+                if (hasUnread) {
+                    Box(
+                        Modifier.defaultMinSize(minWidth = 22.dp).clip(CircleShape).background(BrandEnd),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            if (conv.unreadCount > 99) "99+" else "${conv.unreadCount}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
                     }
                 }
             }
         }
         HorizontalDivider(modifier = Modifier.padding(horizontal = 84.dp), color = Color.White.copy(0.05f))
+    }
+
+    // Delete dialog on long press
+    if (showDeleteDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("Delete chat?") },
+            text  = { Text("This will remove the chat from your list. The other person will still see it.") },
+            confirmButton = {
+                TextButton(onClick = { onDelete(); showDeleteDialog = false }) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { showDeleteDialog = false }) { Text("Cancel") } }
+        )
     }
 }
 

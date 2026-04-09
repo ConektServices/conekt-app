@@ -45,16 +45,19 @@ class ChatListViewModel(private val repo: ChatRepository = ChatRepository()) : V
         _state.value = _state.value.copy(query = "", searchResults = emptyList(), isSearching = false)
     }
 
-    /** Creates or opens a DM conversation. Returns the conversation ID, or "" on failure. */
+    fun deleteConversation(convId: String) {
+        viewModelScope.launch {
+            safe { repo.deleteConversationForMe(convId) }
+            load()
+        }
+    }
+
     suspend fun openOrCreateDm(userId: String): String {
         return try {
-            val id = repo.getOrCreateDm(userId)
-            android.util.Log.d("ChatDebug", "openOrCreateDm success: '$id'")
-            id
+            repo.getOrCreateDm(userId)
         } catch (e: Exception) {
-            android.util.Log.e("ChatDebug", "openOrCreateDm FAILED: ${e::class.simpleName}: ${e.message}")
-            // Surface the error in the UI state so we can see it
-            _state.value = _state.value.copy(error = "Chat error: ${e.message}")
+            android.util.Log.e("ChatDebug", "openOrCreateDm FAILED: ${e.message}")
+            _state.value = _state.value.copy(error = e.message)
             ""
         }
     }
@@ -75,21 +78,30 @@ class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) :
     private var initialized  = false
 
     fun init(conversationId: String, otherId: String) {
-        // If already initialized for this conversation, skip re-init
-        if (initialized && convId == conversationId) return
+        android.util.Log.d("ChatVM", "init: convId=$conversationId otherId=$otherId alreadyInit=$initialized")
+        if (initialized && convId == conversationId) {
+            android.util.Log.d("ChatVM", "Already initialized for this conversation, skipping")
+            return
+        }
         initialized  = true
         convId       = conversationId
         otherUserId  = otherId
         pollJob?.cancel()
         loadMessages()
         startPolling()
+        viewModelScope.launch { safe { repo.markAsRead(conversationId) } }
     }
 
     private fun loadMessages() {
-        if (convId.isBlank()) return
+        if (convId.isBlank()) {
+            android.util.Log.e("ChatVM", "loadMessages called with blank convId!")
+            return
+        }
+        android.util.Log.d("ChatVM", "loadMessages: convId=$convId otherUserId=$otherUserId")
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             val msgs = safe { repo.fetchMessages(convId, otherUserId) } ?: emptyList()
+            android.util.Log.d("ChatVM", "loadMessages done: ${msgs.size} messages")
             _state.value = _state.value.copy(isLoading = false, messages = msgs)
         }
     }
@@ -106,32 +118,58 @@ class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) :
         }
     }
 
-    // ── Draft / input ─────────────────────────────────────────────────────────
+    // ── Draft ─────────────────────────────────────────────────────────────────
 
-    fun onDraftChange(text: String) {
-        _state.value = _state.value.copy(draft = text)
+    fun onDraftChange(text: String) { _state.value = _state.value.copy(draft = text) }
+    fun toggleEmoji()  { _state.value = _state.value.copy(showEmoji = !_state.value.showEmoji, showAttach = false, showPhotoPicker = false) }
+    fun toggleAttach() { _state.value = _state.value.copy(showAttach = !_state.value.showAttach, showEmoji = false, showPhotoPicker = false) }
+    fun togglePhotoPicker() { _state.value = _state.value.copy(showPhotoPicker = !_state.value.showPhotoPicker, showAttach = false, showEmoji = false) }
+    fun appendEmoji(emoji: String) { _state.value = _state.value.copy(draft = _state.value.draft + emoji, showEmoji = false) }
+
+    // ── Reply ─────────────────────────────────────────────────────────────────
+
+    fun setReply(msg: MessageItem, myName: String) {
+        val preview = when (msg.type) {
+            MsgType.IMAGE -> "📷 Photo"
+            MsgType.AUDIO -> "🎵 Audio"
+            MsgType.FILE  -> "📎 ${msg.fileName ?: "File"}"
+            MsgType.MUSIC -> "🎵 ${msg.musicTitle ?: "Track"}"
+            else          -> msg.body?.take(60) ?: ""
+        }
+        _state.value = _state.value.copy(
+            replyingTo = ReplyPreview(
+                messageId  = msg.id,
+                senderName = if (msg.isMe) myName else "them",
+                preview    = preview,
+                isMe       = msg.isMe
+            ),
+            contextMessage = null
+        )
     }
 
-    fun toggleEmoji() {
-        _state.value = _state.value.copy(showEmoji = !_state.value.showEmoji, showAttach = false)
-    }
+    fun clearReply() { _state.value = _state.value.copy(replyingTo = null) }
 
-    fun toggleAttach() {
-        _state.value = _state.value.copy(showAttach = !_state.value.showAttach, showEmoji = false)
-    }
+    // ── Context menu (long press) ─────────────────────────────────────────────
 
-    fun appendEmoji(emoji: String) {
-        _state.value = _state.value.copy(draft = _state.value.draft + emoji, showEmoji = false)
+    fun showContext(msg: MessageItem) { _state.value = _state.value.copy(contextMessage = msg) }
+    fun dismissContext()              { _state.value = _state.value.copy(contextMessage = null) }
+
+    // ── Image viewer ──────────────────────────────────────────────────────────
+
+    fun openImageViewer(images: List<String>, startIndex: Int) {
+        _state.value = _state.value.copy(viewerImages = images, viewerIndex = startIndex, showImageViewer = true)
     }
+    fun closeImageViewer() { _state.value = _state.value.copy(showImageViewer = false) }
 
     // ── Send ──────────────────────────────────────────────────────────────────
 
     fun sendText() {
         val text = _state.value.draft.trim()
         if (text.isBlank() || convId.isBlank()) return
-        _state.value = _state.value.copy(draft = "", isSending = true, showEmoji = false)
+        val reply = _state.value.replyingTo
+        _state.value = _state.value.copy(draft = "", isSending = true, showEmoji = false, replyingTo = null)
         viewModelScope.launch {
-            safe { repo.sendText(convId, text, otherUserId) }
+            safe { repo.sendText(convId, text, otherUserId, reply) }
             refreshMessages()
             _state.value = _state.value.copy(isSending = false)
         }
@@ -139,7 +177,7 @@ class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) :
 
     fun sendFile(context: Context, uri: Uri) {
         if (convId.isBlank()) return
-        _state.value = _state.value.copy(isSending = true, showAttach = false)
+        _state.value = _state.value.copy(isSending = true, showAttach = false, showPhotoPicker = false)
         viewModelScope.launch {
             safe { repo.sendFile(context, convId, uri, otherUserId) }
             refreshMessages()
@@ -156,11 +194,38 @@ class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) :
         }
     }
 
-    fun deleteMessage(msgId: String) {
+    // ── Delete ────────────────────────────────────────────────────────────────
+
+    fun deleteMessageForEveryone(msgId: String) {
+        _state.value = _state.value.copy(contextMessage = null)
         viewModelScope.launch {
-            safe { repo.deleteMessage(msgId) }
+            safe { repo.deleteMessageForEveryone(msgId) }
             refreshMessages()
         }
+    }
+
+    fun deleteMessageForMe(msgId: String) {
+        _state.value = _state.value.copy(
+            contextMessage = null,
+            messages = _state.value.messages.filter { it.id != msgId }
+        )
+        viewModelScope.launch { safe { repo.deleteMessageForMe(msgId) } }
+    }
+
+    // ── React ─────────────────────────────────────────────────────────────────
+
+    fun react(msg: MessageItem, emoji: String) {
+        _state.value = _state.value.copy(contextMessage = null)
+        viewModelScope.launch {
+            safe { repo.addReaction(msg.id, emoji, msg.reactions) }
+            refreshMessages()
+        }
+    }
+
+    // ── Block ─────────────────────────────────────────────────────────────────
+
+    fun blockUser(convId: String, block: Boolean) {
+        viewModelScope.launch { safe { repo.blockUser(convId, block) } }
     }
 
     private suspend fun refreshMessages() {
@@ -186,42 +251,19 @@ class UserProfileViewModel(
     private val _state = MutableStateFlow(UserProfileState())
     val state: StateFlow<UserProfileState> = _state.asStateFlow()
 
-    /** Load a user's profile AND their public posts */
     fun load(userId: String) {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
-
-            // Load profile info (includes follower/following counts, isVerified, etc.)
             val profile = safe { chatRepo.fetchProfile(userId) }
-
-            // Load their public posts so we can display them
-            val posts = safe { profileRepo.getPublicProfilePosts(userId) } ?: emptyList()
-
-            _state.value = _state.value.copy(
-                isLoading   = false,
-                profile     = profile,
-                posts       = posts,
-                isFollowing = profile?.isFollowing ?: false,
-                error       = if (profile == null) "Could not load profile." else null
-            )
+            val posts   = safe { profileRepo.getPublicProfilePosts(userId) } ?: emptyList()
+            _state.value = _state.value.copy(isLoading = false, profile = profile, posts = posts, isFollowing = profile?.isFollowing ?: false, error = if (profile == null) "Could not load profile." else null)
         }
     }
 
     fun toggleFollow(userId: String) {
         val wasFollowing = _state.value.isFollowing
-        // Optimistic update
-        val currentProfile = _state.value.profile
-        _state.value = _state.value.copy(
-            isFollowing = !wasFollowing,
-            profile = currentProfile?.copy(
-                followerCount = if (wasFollowing) currentProfile.followerCount - 1
-                else currentProfile.followerCount + 1
-            )
-        )
-        viewModelScope.launch {
-            if (wasFollowing) safe { chatRepo.unfollow(userId) }
-            else safe { chatRepo.follow(userId) }
-        }
+        _state.value = _state.value.copy(isFollowing = !wasFollowing, profile = _state.value.profile?.copy(followerCount = _state.value.profile!!.followerCount + if (wasFollowing) -1 else 1))
+        viewModelScope.launch { if (wasFollowing) safe { chatRepo.unfollow(userId) } else safe { chatRepo.follow(userId) } }
     }
 
     fun startDm(userId: String, onReady: (convId: String) -> Unit) {
