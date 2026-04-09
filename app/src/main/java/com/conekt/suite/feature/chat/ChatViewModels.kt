@@ -20,14 +20,39 @@ class ChatListViewModel(private val repo: ChatRepository = ChatRepository()) : V
     private val _state = MutableStateFlow(ChatListState())
     val state: StateFlow<ChatListState> = _state.asStateFlow()
 
-    init { load() }
+    // Track whether we've loaded at least once so we don't blank out the screen
+    // on every recomposition — only do a background refresh instead.
+    private var hasLoadedOnce = false
 
-    fun load() {
+    init {
+        // Load immediately when ViewModel is first created.
+        // Because the ViewModel lives as long as the nav backstack entry, this
+        // only runs once per session, not on every screen visit.
+        load(showLoadingSpinner = true)
+    }
+
+    /**
+     * Called by the UI whenever the ChatList screen becomes visible.
+     * Does a silent background refresh so existing data stays visible while
+     * fresh data loads — no full loading spinner after the first load.
+     */
+    fun refresh() {
+        load(showLoadingSpinner = !hasLoadedOnce)
+    }
+
+    fun load(showLoadingSpinner: Boolean = true) {
         viewModelScope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
+            if (showLoadingSpinner) {
+                _state.value = _state.value.copy(isLoading = true, error = null)
+            }
             val convs   = safe { repo.fetchConversations() } ?: emptyList()
             val stories = safe { repo.fetchStories() }       ?: emptyList()
-            _state.value = _state.value.copy(isLoading = false, conversations = convs, stories = stories)
+            _state.value = _state.value.copy(
+                isLoading = false,
+                conversations = convs,
+                stories = stories
+            )
+            hasLoadedOnce = true
         }
     }
 
@@ -48,7 +73,7 @@ class ChatListViewModel(private val repo: ChatRepository = ChatRepository()) : V
     fun deleteConversation(convId: String) {
         viewModelScope.launch {
             safe { repo.deleteConversationForMe(convId) }
-            load()
+            load(showLoadingSpinner = false)
         }
     }
 
@@ -167,9 +192,13 @@ class ChatThreadViewModel(private val repo: ChatRepository = ChatRepository()) :
         val text = _state.value.draft.trim()
         if (text.isBlank() || convId.isBlank()) return
         val reply = _state.value.replyingTo
+
+        // Optimistic: clear draft immediately so the user sees a responsive UI
         _state.value = _state.value.copy(draft = "", isSending = true, showEmoji = false, replyingTo = null)
+
         viewModelScope.launch {
             safe { repo.sendText(convId, text, otherUserId, reply) }
+            // Immediately refresh after sending so the sent message appears
             refreshMessages()
             _state.value = _state.value.copy(isSending = false)
         }

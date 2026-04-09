@@ -20,6 +20,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
 import com.conekt.suite.ui.theme.*
@@ -38,6 +41,20 @@ fun ChatListScreen(
     val state by vm.state.collectAsState()
     val scope = rememberCoroutineScope()
 
+    // Refresh the chat list whenever this screen becomes (re-)visible in the
+    // foreground — e.g. after returning from a thread — without showing the
+    // full loading spinner (silent refresh keeps existing chats visible).
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                vm.refresh()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF09090F))) {
         Column(modifier = Modifier.fillMaxSize()) {
 
@@ -54,7 +71,12 @@ fun ChatListScreen(
                         Text("Messages", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
                         Text("your circle", style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.38f))
                     }
-                    Box(Modifier.size(36.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.07f)).clickable { vm.load() }, contentAlignment = Alignment.Center) {
+                    Box(
+                        Modifier.size(36.dp).clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.07f))
+                            .clickable { vm.refresh() },
+                        contentAlignment = Alignment.Center
+                    ) {
                         Icon(Icons.Rounded.Refresh, null, tint = Color.White, modifier = Modifier.size(18.dp))
                     }
                 }
@@ -139,21 +161,22 @@ fun ChatListScreen(
                     }
 
                     when {
-                        state.isLoading -> item(key = "loading") {
+                        // Show spinner only on the very first load (isLoading=true && no data yet)
+                        state.isLoading && state.conversations.isEmpty() -> item(key = "loading") {
                             Box(Modifier.fillMaxWidth().height(160.dp), contentAlignment = Alignment.Center) {
                                 CircularProgressIndicator(color = BrandEnd, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
                             }
                         }
-                        state.conversations.isEmpty() -> item(key = "empty") {
+                        state.conversations.isEmpty() && !state.isLoading -> item(key = "empty") {
                             EmptyConversationState()
                         }
                         else -> items(state.conversations, key = { it.id }) { conv ->
-ConversationRow(
-            conv     = conv,
-            onClick  = { onOpenThread(conv.id, conv.otherUserId, conv.name, conv.avatarUrl ?: "") },
-            onDelete = { vm.deleteConversation(conv.id) }
-        )
-    }
+                            ConversationRow(
+                                conv     = conv,
+                                onClick  = { onOpenThread(conv.id, conv.otherUserId, conv.name, conv.avatarUrl ?: "") },
+                                onDelete = { vm.deleteConversation(conv.id) }
+                            )
+                        }
                     }
                 }
             }
@@ -225,12 +248,10 @@ private fun ConversationRow(conv: ConversationItem, onClick: () -> Unit, onDelet
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                // Subtle highlight for unread conversations
                 .background(if (hasUnread) BrandEnd.copy(alpha = 0.06f) else Color.Transparent)
                 .padding(horizontal = 20.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Avatar with online indicator
             Box(contentAlignment = Alignment.BottomEnd) {
                 Box(Modifier.size(52.dp).clip(CircleShape).background(BrandEnd.copy(alpha = 0.16f))) {
                     conv.avatarUrl?.ifBlank { null }?.let {
@@ -261,7 +282,6 @@ private fun ConversationRow(conv: ConversationItem, onClick: () -> Unit, onDelet
                 Text(
                     conv.lastMessage ?: "Start a conversation",
                     style = MaterialTheme.typography.bodySmall,
-                    // Unread messages appear brighter
                     color = if (hasUnread) Color.White.copy(0.85f) else Color.White.copy(0.38f),
                     fontWeight = if (hasUnread) FontWeight.Medium else FontWeight.Normal,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -294,7 +314,6 @@ private fun ConversationRow(conv: ConversationItem, onClick: () -> Unit, onDelet
         HorizontalDivider(modifier = Modifier.padding(horizontal = 84.dp), color = Color.White.copy(0.05f))
     }
 
-    // Delete dialog on long press
     if (showDeleteDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteDialog = false },
@@ -339,12 +358,7 @@ private fun SearchResultsList(
     }
 
     LazyColumn(
-        contentPadding = PaddingValues(
-            start = 16.dp,
-            top = 4.dp,
-            end = 16.dp,
-            bottom = 120.dp
-        ),
+        contentPadding = PaddingValues(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 120.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         items(results, key = { it.id }) { user ->
@@ -370,7 +384,6 @@ private fun SearchResultsList(
                     Text("@${user.username}", style = MaterialTheme.typography.bodySmall, color = Color.White.copy(0.38f))
                 }
                 Spacer(Modifier.width(8.dp))
-                // Tap this to open/create DM and navigate to ChatThreadScreen
                 Box(
                     modifier = Modifier
                         .height(36.dp)

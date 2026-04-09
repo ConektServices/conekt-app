@@ -30,6 +30,8 @@ import java.time.Instant
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.runtime.mutableIntStateOf
 
 private enum class PulseTab(val label: String) {
     HOME("Home"), CHATS("Chats"), FEED("Feed"), STORIES("Stories")
@@ -45,6 +47,10 @@ fun PulseScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     var selectedTab by rememberSaveable { mutableStateOf(PulseTab.HOME) }
+
+    // Story viewer state — null means viewer is closed
+    var viewerStories by remember { mutableStateOf<List<StoryWithAuthor>>(emptyList()) }
+    var viewerStartIndex by remember { mutableIntStateOf(0) }
 
     Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
 
@@ -69,7 +75,16 @@ fun PulseScreen(
             verticalArrangement = Arrangement.spacedBy(0.dp)
         ) {
             when (selectedTab) {
-                PulseTab.HOME -> homeItems(state, viewModel, onOpenUserProfile, onCreatePostClick)
+                PulseTab.HOME -> homeItems(
+                    state          = state,
+                    vm             = viewModel,
+                    onProfile      = onOpenUserProfile,
+                    onCreatePost   = onCreatePostClick,
+                    onOpenStory    = { stories, index ->
+                        viewerStories    = stories
+                        viewerStartIndex = index
+                    }
+                )
                 PulseTab.FEED -> feedItems(state, onOpenUserProfile, viewModel)
                 PulseTab.STORIES -> storiesItems(state, onOpenUserProfile)
                 PulseTab.CHATS -> {}
@@ -90,6 +105,15 @@ fun PulseScreen(
             PulseTopBar(onCreatePost = onCreatePostClick)
             Spacer(Modifier.height(10.dp))
             PulseTabStrip(selected = selectedTab, onSelect = { selectedTab = it })
+        }
+        // ── Story viewer overlay ─────────────────────────────────────────────
+        // Shown on top of everything when a story ring is tapped.
+        if (viewerStories.isNotEmpty()) {
+            StoryViewerScreen(
+                stories    = viewerStories,
+                startIndex = viewerStartIndex,
+                onClose    = { viewerStories = emptyList() }
+            )
         }
     }
 }
@@ -163,7 +187,8 @@ private fun LazyListScope.homeItems(
     state: PulseUiState,
     vm: PulseViewModel,
     onProfile: (String) -> Unit,
-    onCreatePost: () -> Unit
+    onCreatePost: () -> Unit,
+    onOpenStory: (stories: List<StoryWithAuthor>, index: Int) -> Unit   // ← new
 ) {
     // 1. Greeting Hero
     item(key = "greeting") {
@@ -174,7 +199,10 @@ private fun LazyListScope.homeItems(
     // 2. Active Followers (from stories data = recently active)
     if (state.stories.isNotEmpty()) {
         item(key = "active_followers") {
-            HomeActiveFollowers(stories = state.stories, onTap = onProfile)
+            HomeActiveFollowers(
+                stories    = state.stories,
+                onOpenStory = onOpenStory          // ← was: onTap = onProfile
+            )
             Spacer(Modifier.height(18.dp))
         }
     }
@@ -346,23 +374,44 @@ private fun HomeGreetingHero(onCreatePost: () -> Unit) {
 }
 
 @Composable
-private fun HomeActiveFollowers(stories: List<StoryWithAuthor>, onTap: (String) -> Unit) {
+private fun HomeActiveFollowers(
+    stories: List<StoryWithAuthor>,
+    onOpenStory: (stories: List<StoryWithAuthor>, index: Int) -> Unit
+) {
+    // Group stories by author so each ring represents one person.
+    val grouped = stories.groupBy { it.author.id }
+    val authors = grouped.values.toList()   // list of per-author story lists
+
     Column {
-        HomeSectionHeader(title = "Active Now", subtitle = "${stories.distinctBy { it.author.id }.size} people")
+        HomeSectionHeader(
+            title    = "Active Now",
+            subtitle = "${authors.size} people"
+        )
         Spacer(Modifier.height(12.dp))
         LazyRow(
-            contentPadding = PaddingValues(horizontal = 20.dp),
+            contentPadding        = PaddingValues(horizontal = 20.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            items(stories.distinctBy { it.author.id }.take(12), key = { it.id }) { story ->
-                val name = story.author.displayName ?: story.author.username
+            itemsIndexed(authors, key = { _, list -> list.first().author.id }) { authorIdx, authorStories ->
+                val first = authorStories.first()
+                val name  = first.author.displayName ?: first.author.username
+
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.width(64.dp).clickable { onTap(story.author.id) }
+                    modifier = Modifier
+                        .width(64.dp)
+                        // Tap → open story viewer starting at this author's first story.
+                        // We flatten all stories into a single list, but start at the
+                        // index of this author's first story so the progress bars work.
+                        .clickable {
+                            val flatIndex = stories.indexOf(first).coerceAtLeast(0)
+                            onOpenStory(stories, flatIndex)
+                        }
                 ) {
                     Box(contentAlignment = Alignment.BottomEnd) {
                         Box(
-                            Modifier.size(58.dp)
+                            Modifier
+                                .size(58.dp)
                                 .background(
                                     Brush.linearGradient(listOf(BrandStart, BrandEnd)),
                                     CircleShape
@@ -370,25 +419,36 @@ private fun HomeActiveFollowers(stories: List<StoryWithAuthor>, onTap: (String) 
                                 .padding(2.dp)
                         ) {
                             Box(
-                                Modifier.fillMaxSize()
+                                Modifier
+                                    .fillMaxSize()
                                     .clip(CircleShape)
                                     .background(MaterialTheme.colorScheme.background)
                                     .padding(1.5.dp)
                                     .clip(CircleShape)
                             ) {
-                                val avatar = story.author.avatarUrl?.ifBlank { null }
+                                val avatar = first.author.avatarUrl?.ifBlank { null }
                                 if (avatar != null) {
                                     AsyncImage(avatar, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                                 } else {
-                                    Box(Modifier.fillMaxSize().background(BrandEnd.copy(alpha = 0.22f)), contentAlignment = Alignment.Center) {
-                                        Text(name.first().uppercaseChar().toString(), color = BrandEnd, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+                                    Box(
+                                        Modifier.fillMaxSize().background(BrandEnd.copy(alpha = 0.22f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            name.first().uppercaseChar().toString(),
+                                            color      = BrandEnd,
+                                            fontWeight = FontWeight.Bold,
+                                            style      = MaterialTheme.typography.titleSmall
+                                        )
                                     }
                                 }
                             }
                         }
                         // Active dot
                         Box(
-                            Modifier.size(14.dp).clip(CircleShape)
+                            Modifier
+                                .size(14.dp)
+                                .clip(CircleShape)
                                 .background(SuccessGreen)
                                 .border(2.dp, MaterialTheme.colorScheme.background, CircleShape)
                         )
@@ -396,10 +456,10 @@ private fun HomeActiveFollowers(stories: List<StoryWithAuthor>, onTap: (String) 
                     Spacer(Modifier.height(6.dp))
                     Text(
                         name.substringBefore(" "),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                        style     = MaterialTheme.typography.labelSmall,
+                        color     = MaterialTheme.colorScheme.onSurface,
+                        maxLines  = 1,
+                        overflow  = TextOverflow.Ellipsis,
                         textAlign = TextAlign.Center
                     )
                 }

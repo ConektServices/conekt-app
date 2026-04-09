@@ -42,7 +42,6 @@ private data class MsgRow(
     @SerialName("file_name")       val fileName: String? = null,
     @SerialName("is_deleted")      val isDeleted: Boolean = false,
     @SerialName("created_at")      val createdAt: String = "",
-    // These are nullable with defaults — safe even if columns don't exist yet
     @SerialName("reply_to_id")     val replyToId: String? = null,
     @SerialName("reply_preview")   val replyPreview: String? = null,
     val reactions: String? = null
@@ -131,13 +130,16 @@ class ChatRepository(private val auth: AuthRepository = AuthRepository()) {
             return emptyList()
         }
 
+        // FIX: Removed the neq("is_deleted", true) filter from the query.
+        // In PostgREST, neq(true) silently excludes rows where the column IS NULL,
+        // which means messages with a null is_deleted never return.
+        // Instead we fetch all messages and filter deleted ones in Kotlin,
+        // so we can still show the "Message deleted" placeholder in the UI.
         val rows = try {
             db.from("messages")
                 .select {
                     filter {
                         eq("conversation_id", convId)
-                        // Use neq instead of eq(false) to handle null values safely
-                        neq("is_deleted", true)
                     }
                     order("created_at", Order.ASCENDING)
                     limit(200)
@@ -166,7 +168,6 @@ class ChatRepository(private val auth: AuthRepository = AuthRepository()) {
                         if (r.body == null) {
                             null
                         } else if (otherUserId.isBlank()) {
-                            // Can't decrypt without otherUserId — show placeholder
                             android.util.Log.w("ChatMsg", "otherUserId is blank, cannot decrypt msg ${r.id}")
                             "[message]"
                         } else {
@@ -179,7 +180,6 @@ class ChatRepository(private val auth: AuthRepository = AuthRepository()) {
                     else -> null
                 }
 
-                // Safely parse music payload
                 var mTitle: String? = null; var mArtist: String? = null
                 var mCover: String? = null;  var mFile:  String? = null
                 if (type == MsgType.MUSIC && r.body != null) {
@@ -195,28 +195,18 @@ class ChatRepository(private val auth: AuthRepository = AuthRepository()) {
                     }
                 }
 
-                // Safely parse reactions (maybe null or malformed in older rows)
                 val reactions: Map<String, Int> = runCatching {
                     val raw = r.reactions
-
                     if (raw.isNullOrBlank() || raw == "{}" || raw == "null") {
                         emptyMap()
                     } else {
-                        val j = Json.parseToJsonElement(raw)
-                            .jsonObject
-
+                        val j = Json.parseToJsonElement(raw).jsonObject
                         j.entries.associate { entry: Map.Entry<String, JsonElement> ->
-                            val key: String = entry.key
-                            val value: Int = (entry.value as? JsonPrimitive)
-                                ?.contentOrNull
-                                ?.toIntOrNull() ?: 0
-
-                            key to value
+                            entry.key to ((entry.value as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 0)
                         }
                     }
                 }.getOrDefault(emptyMap())
 
-                // Safely parse reply preview
                 val reply = if (!r.replyToId.isNullOrBlank() && !r.replyPreview.isNullOrBlank()) {
                     runCatching {
                         val j = kotlinx.serialization.json.Json
@@ -247,12 +237,10 @@ class ChatRepository(private val auth: AuthRepository = AuthRepository()) {
                     musicFile   = mFile,
                     replyTo     = reply,
                     reactions   = reactions
-                ).also {
-                    android.util.Log.d("ChatMsg", "Mapped message ${r.id}: type=${it.type} isMe=${it.isMe} body='${it.body?.take(20)}'")
-                }
+                )
             } catch (e: Exception) {
                 android.util.Log.e("ChatMsg", "Failed to map message ${r.id}: ${e.message}")
-                null  // skip broken messages instead of crashing
+                null
             }
         }
     }
